@@ -1,0 +1,90 @@
+:root {
+  color-scheme: dark;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  background: #0a0c10;
+  color: #d8dde6;
+  overflow: hidden;
+}
+
+#gfx {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  outline: none;
+  touch-action: none;
+}
+
+#overlay {
+  position: fixed;
+  top: 8px;
+  left: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  pointer-events: none;
+  z-index: 5;
+}
+
+#title {
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  opacity: 0.65;
+  padding: 4px 6px;
+  background: rgba(20, 24, 32, 0.55);
+  border-radius: 4px;
+  width: max-content;
+}
+
+#stats {
+  pointer-events: auto;
+}
+
+#stats > * {
+  position: static !important;
+}
+
+#timings {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  padding: 4px 6px;
+  background: rgba(20, 24, 32, 0.55);
+  border-radius: 4px;
+  width: max-content;
+  white-space: pre;
+}
+
+#error {
+  position: fixed;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(10, 12, 16, 0.92);
+  color: #ff6b6b;
+  font-size: 14px;
+  line-height: 1.5;
+  text-align: center;
+  z-index: 100;
+  white-space: pre-wrap;
+}
+
+#error.visible {
+  display: flex;
+}
