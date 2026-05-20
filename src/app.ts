@@ -1,13 +1,25 @@
 import tgpu from 'typegpu';
+import * as d from 'typegpu/data';
 import { acquireGpu, showFatalError } from './util/webgpu';
 import { createManagedSurface } from './util/resize';
-import { createSim, DEFAULT_SIM_PARAMS, type SimParams } from './sim';
+import {
+  createSim,
+  DEFAULT_SIM_PARAMS,
+  SIM_BOX_MAX,
+  SIM_BOX_MIN,
+  type SimParams,
+} from './sim';
+import { allocateParticles } from './sim/particles';
 import {
   createRenderer,
   type RenderParams,
 } from './render';
-import { createGui } from './ui/gui';
+import {
+  createGui,
+  type SimulationSource,
+} from './ui/gui';
 import { createStats } from './ui/stats';
+import { CpuReferenceSim, type ReferenceSimParams } from './reference';
 
 export interface App {
   start(): Promise<void>;
@@ -44,6 +56,11 @@ async function run(): Promise<void> {
 
   const sim = createSim(root, device, DEFAULT_SIM_PARAMS);
   const renderer = createRenderer(device, surfaceFormat, sim.allocation);
+  let source: SimulationSource = 'gpu';
+
+  let referenceAlloc = allocateParticles(root, sim.params.particleCount);
+  let referenceSim = new CpuReferenceSim(toReferenceParams(sim.params));
+  uploadReferenceParticles();
 
   const detachCamera = renderer.camera.attach(canvas);
   applyAspect();
@@ -55,16 +72,30 @@ async function run(): Promise<void> {
   }
 
   const stats = createStats(statsHost, timingsHost);
-  const gui = createGui(sim.params, renderer.params, {
+  const gui = createGui(sim.params, renderer.params, source, {
     onReset(count: number): void {
-      sim.reset(count);
-      renderer.rebindParticles(sim.allocation);
+      if (source === 'gpu') {
+        sim.reset(count);
+        renderer.rebindParticles(sim.allocation);
+        return;
+      }
+      rebuildReference(count);
     },
     onSimChange(next: SimParams): void {
       sim.setParams(next);
+      if (next.particleCount !== referenceAlloc.count) {
+        rebuildReference(next.particleCount);
+        return;
+      }
+      referenceSim.setParams(toReferenceParams(next));
+      uploadReferenceParticles();
     },
     onRenderChange(next: RenderParams): void {
       renderer.setParams(next);
+    },
+    onSourceChange(next: SimulationSource): void {
+      source = next;
+      renderer.rebindParticles(source === 'gpu' ? sim.allocation : referenceAlloc);
     },
   });
 
@@ -87,7 +118,12 @@ async function run(): Promise<void> {
     const encoder = device.createCommandEncoder({ label: 'frame' });
 
     const simMarks = timing.markSim();
-    sim.step(encoder, dt, simMarks.gpu);
+    if (source === 'gpu') {
+      sim.step(encoder, dt, simMarks.gpu);
+    } else if (dt > 0) {
+      referenceSim.step(dt);
+      uploadReferenceParticles();
+    }
 
     const renderMarks = timing.markRender();
     renderer.draw(
@@ -122,10 +158,69 @@ async function run(): Promise<void> {
     stats.dispose();
     renderer.dispose();
     sim.dispose();
+    referenceAlloc.gpuBuffer.destroy();
     timing.dispose();
     surface.dispose();
     root.destroy();
   });
+
+  function rebuildReference(count: number): void {
+    referenceAlloc.gpuBuffer.destroy();
+    referenceAlloc = allocateParticles(root, Math.max(64, Math.floor(count)));
+    referenceSim = new CpuReferenceSim(
+      toReferenceParams({
+        ...sim.params,
+        particleCount: referenceAlloc.count,
+      }),
+    );
+    uploadReferenceParticles();
+    if (source === 'reference') renderer.rebindParticles(referenceAlloc);
+  }
+
+  function uploadReferenceParticles(): void {
+    const particles = referenceSim.getParticles();
+    const data = new Array(referenceAlloc.count);
+    for (let i = 0; i < referenceAlloc.count; i++) {
+      const p = particles[i];
+      data[i] = {
+        position: d.vec3f(
+          p?.position.x ?? 0,
+          p?.position.y ?? 0,
+          p?.position.z ?? 0,
+        ),
+        velocity: d.vec3f(
+          p?.velocity.x ?? 0,
+          p?.velocity.y ?? 0,
+          p?.velocity.z ?? 0,
+        ),
+      };
+    }
+    referenceAlloc.buffer.write(data);
+  }
+}
+
+function toReferenceParams(sim: SimParams): ReferenceSimParams {
+  return {
+    particleCount: sim.particleCount,
+    smoothingRadius: 0.1,
+    restDensity: 1000,
+    gasConstant: 800,
+    maxPressure: 40_000,
+    viscosity: 2.0,
+    gravity: {
+      x: sim.gravity[0],
+      y: sim.gravity[1],
+      z: sim.gravity[2],
+    },
+    boxMin: { x: SIM_BOX_MIN[0], y: SIM_BOX_MIN[1], z: SIM_BOX_MIN[2] },
+    boxMax: { x: SIM_BOX_MAX[0], y: SIM_BOX_MAX[1], z: SIM_BOX_MAX[2] },
+    boundaryDamping: Math.min(sim.restitution, 0.15),
+    boundarySlop: 0.002,
+    boundaryTangentialDamping: 0.92,
+    maxSubstepDt: 1 / 720,
+    logEveryNSteps: 30,
+    timestep: Math.min(sim.timestep, 1 / 240),
+  };
 }
 
 interface PassMarks {

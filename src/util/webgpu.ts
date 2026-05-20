@@ -18,23 +18,56 @@ export async function acquireGpu(): Promise<GpuContext> {
     throw new Error('No suitable GPU adapter was found.');
   }
 
-  const hasTimestampQuery = adapter.features.has('timestamp-query');
+  const wantTimestamp = timestampOptIn();
+  const adapterHasTimestamp = adapter.features.has('timestamp-query');
+  const requestTimestamp = wantTimestamp && adapterHasTimestamp;
   const requiredFeatures: GPUFeatureName[] = [];
-  if (hasTimestampQuery) requiredFeatures.push('timestamp-query');
+  if (requestTimestamp) requiredFeatures.push('timestamp-query');
 
   const device = await adapter.requestDevice({ requiredFeatures });
+
+  const hasTimestampQuery = requestTimestamp && device.features.has('timestamp-query');
+
   device.lost.then((info) => {
-    console.error('[gpu] device lost:', info.message);
+    const reason = (info as GPUDeviceLostInfo).reason ?? 'unknown';
+    const msg = `WebGPU device lost (${reason}): ${info.message || 'no message'}`;
+    console.error('[gpu]', msg);
+    showFatalError(msg);
   });
 
-  logAdapterInfo(adapter, device, hasTimestampQuery);
+  device.addEventListener?.('uncapturederror', (ev) => {
+    const e = ev as GPUUncapturedErrorEvent;
+    console.error('[gpu] uncaptured error:', e.error.message);
+  });
+
+  logAdapterInfo(adapter, device, {
+    timestampQueryRequested: wantTimestamp,
+    timestampQueryAdapter: adapterHasTimestamp,
+    timestampQueryEnabled: hasTimestampQuery,
+  });
   return { adapter, device, hasTimestampQuery };
+}
+
+function timestampOptIn(): boolean {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const v = params.get('ts');
+    return v === '1' || v === 'true';
+  } catch {
+    return false;
+  }
+}
+
+interface TimestampStatus {
+  timestampQueryRequested: boolean;
+  timestampQueryAdapter: boolean;
+  timestampQueryEnabled: boolean;
 }
 
 function logAdapterInfo(
   adapter: GPUAdapter,
   device: GPUDevice,
-  hasTimestampQuery: boolean,
+  ts: TimestampStatus,
 ): void {
   const info = adapter.info;
   console.info('[gpu] adapter', {
@@ -54,7 +87,7 @@ function logAdapterInfo(
   });
 
   console.info('[gpu] features', {
-    timestampQuery: hasTimestampQuery,
+    timestampQuery: ts,
     available: [...adapter.features].sort(),
   });
 }

@@ -26,9 +26,9 @@ export const DEFAULT_SIM_PARAMS: SimParams = {
   paused: false,
 };
 
-export const SIM_BOX_MIN: [number, number, number] = [-1, -1, -1];
-export const SIM_BOX_MAX: [number, number, number] = [1, 1, 1];
-const SEED_HALF_EXTENT = 0.5;
+export const SIM_BOX_MIN: [number, number, number] = [-0.42, -0.42, -0.42];
+export const SIM_BOX_MAX: [number, number, number] = [0.42, 0.42, 0.42];
+const SEED_HALF_EXTENT = 0.21;
 
 export interface Sim {
   readonly params: SimParams;
