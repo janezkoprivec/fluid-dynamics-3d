@@ -1,15 +1,26 @@
 import integrateWgsl from './shaders/integrate.wgsl?raw';
 import type { ParticleAllocation } from './particles';
 
-const PARAMS_BYTE_SIZE = 64;
+const PARAMS_BYTE_SIZE = 96;
 const WORKGROUP_SIZE = 64;
 
 export interface IntegratorState {
   gravity: [number, number, number];
-  restitution: number;
   dt: number;
+
   boxMin: [number, number, number];
   boxMax: [number, number, number];
+  boundaryDamping: number;
+  boundarySlop: number;
+
+  smoothingRadius: number; // h
+  restDensity: number;     // rho0
+  gasConstant: number;     // k
+  viscosity: number;       // mu
+  gamma: number;           // Tait gamma
+  maxPressure: number;
+
+  gridResolution: [number, number, number]; // placeholder for hash stage
 }
 
 export interface Integrator {
@@ -80,18 +91,56 @@ export function createIntegrator(
   }
 
   function writeParams(state: IntegratorState): void {
+    // SimParams uniform packing (24 * 4 = 96 bytes):
+    // f32[ 0.. 2] gravity.xyz
+    // f32[ 3]     dt
+    // f32[ 4.. 6] boxMin.xyz
+    // f32[ 7]     boundaryDamping
+    // f32[ 8..10] boxMax.xyz
+    // f32[11]     smoothingRadius
+    // f32[12]     restDensity
+    // f32[13]     gasConstant
+    // f32[14]     viscosity
+    // f32[15]     gamma
+    // f32[16]     maxPressure
+    // f32[17]     boundarySlop
+    // u32[18]     particleCount
+    // u32[19]     _pad0
+    // u32[20]     gridResolution.x
+    // u32[21]     gridResolution.y
+    // u32[22]     gridResolution.z
+    // u32[23]     _pad1
+  
     paramsF32[0] = state.gravity[0];
     paramsF32[1] = state.gravity[1];
     paramsF32[2] = state.gravity[2];
     paramsF32[3] = state.dt;
+  
     paramsF32[4] = state.boxMin[0];
     paramsF32[5] = state.boxMin[1];
     paramsF32[6] = state.boxMin[2];
-    paramsF32[7] = state.restitution;
+    paramsF32[7] = state.boundaryDamping;
+  
     paramsF32[8] = state.boxMax[0];
     paramsF32[9] = state.boxMax[1];
     paramsF32[10] = state.boxMax[2];
-    paramsU32[11] = alloc.count;
+    paramsF32[11] = state.smoothingRadius;
+  
+    paramsF32[12] = state.restDensity;
+    paramsF32[13] = state.gasConstant;
+    paramsF32[14] = state.viscosity;
+    paramsF32[15] = state.gamma;
+  
+    paramsF32[16] = state.maxPressure;
+    paramsF32[17] = state.boundarySlop;
+  
+    paramsU32[18] = alloc.count;
+    paramsU32[19] = 0;
+    paramsU32[20] = state.gridResolution[0] >>> 0;
+    paramsU32[21] = state.gridResolution[1] >>> 0;
+    paramsU32[22] = state.gridResolution[2] >>> 0;
+    paramsU32[23] = 0;
+  
     device.queue.writeBuffer(paramsBuffer, 0, paramsHost);
   }
 

@@ -19,7 +19,7 @@ export interface SimParams {
 }
 
 export const DEFAULT_SIM_PARAMS: SimParams = {
-  particleCount: 16_384,
+  particleCount: 1536,
   gravity: [0, -9.81, 0],
   restitution: 0.4,
   timestep: 1 / 120,
@@ -29,6 +29,15 @@ export const DEFAULT_SIM_PARAMS: SimParams = {
 export const SIM_BOX_MIN: [number, number, number] = [-0.42, -0.42, -0.42];
 export const SIM_BOX_MAX: [number, number, number] = [0.42, 0.42, 0.42];
 const SEED_HALF_EXTENT = 0.21;
+
+const SPH_SMOOTHING_RADIUS = 0.1;
+const SPH_REST_DENSITY = 1000;
+const SPH_GAS_CONSTANT = 800;
+const SPH_VISCOSITY = 2.0;
+const SPH_GAMMA = 7.0;
+const SPH_MAX_PRESSURE = 40_000;
+const BOUNDARY_SLOP = 0.002;
+const GRID_RESOLUTION: [number, number, number] = [64, 64, 64];
 
 export interface Sim {
   readonly params: SimParams;
@@ -57,10 +66,20 @@ export function createSim(
   function currentIntegratorState(dt: number): IntegratorState {
     return {
       gravity: params.gravity,
-      restitution: params.restitution,
       dt,
       boxMin: SIM_BOX_MIN,
       boxMax: SIM_BOX_MAX,
+      boundaryDamping: params.restitution,
+      boundarySlop: BOUNDARY_SLOP,
+    
+      smoothingRadius: SPH_SMOOTHING_RADIUS,
+      restDensity: SPH_REST_DENSITY,
+      gasConstant: SPH_GAS_CONSTANT,
+      viscosity: SPH_VISCOSITY,
+      gamma: SPH_GAMMA,
+      maxPressure: SPH_MAX_PRESSURE,
+    
+      gridResolution: GRID_RESOLUTION,
     };
   }
 
