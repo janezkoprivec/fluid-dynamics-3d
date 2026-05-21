@@ -1,6 +1,13 @@
 struct Particle {
   position: vec3<f32>,
+  _pad0: f32,
   velocity: vec3<f32>,
+  _pad1: f32,
+  acceleration: vec3<f32>,
+  _pad2: f32,
+  density: f32,
+  pressure: f32,
+  _pad3: vec2<f32>,
 };
 
 struct Camera {

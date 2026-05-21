@@ -188,11 +188,18 @@ async function run(): Promise<void> {
           p?.position.y ?? 0,
           p?.position.z ?? 0,
         ),
+        _pad0: 0,
         velocity: d.vec3f(
           p?.velocity.x ?? 0,
           p?.velocity.y ?? 0,
           p?.velocity.z ?? 0,
         ),
+        _pad1: 0,
+        acceleration: d.vec3f(0, 0, 0),
+        _pad2: 0,
+        density: p?.density ?? 0,
+        pressure: p?.pressure ?? 0,
+        _pad3: d.vec2f(0, 0),
       };
     }
     referenceAlloc.buffer.write(data);

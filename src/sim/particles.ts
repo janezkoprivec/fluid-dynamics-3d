@@ -1,9 +1,32 @@
 import * as d from 'typegpu/data';
 import type { TgpuRoot, TgpuBuffer, StorageFlag } from 'typegpu';
 
+// GPU particle memory contract (must match WGSL `struct Particle` exactly in
+// `src/sim/shaders/integrate.wgsl` and `src/render/shaders/pointSprites.wgsl`).
+//
+// Layout / offsets (bytes), total stride = 64 bytes:
+//   0..15  : position.xyz + _pad0
+//  16..31  : velocity.xyz + _pad1
+//  32..47  : acceleration.xyz + _pad2
+//  48..55  : density + pressure
+//  56..63  : _pad3.xy
+//
+// Padding fields are intentional for alignment; do not remove/reorder fields
+// without updating all matching WGSL structs and upload paths.
+
 export const Particle = d.struct({
   position: d.vec3f,
+  _pad0: d.f32,
+
   velocity: d.vec3f,
+  _pad1: d.f32,
+
+  acceleration: d.vec3f,
+  _pad2: d.f32,
+
+  density: d.f32,
+  pressure: d.f32,
+  _pad3: d.vec2f,
 });
 export type ParticleSchema = typeof Particle;
 
@@ -52,9 +75,15 @@ export function seedRandomCube(
       position: d.vec3f(
         (rng() * 2 - 1) * half,
         (rng() * 2 - 1) * half,
-        (rng() * 2 - 1) * half,
-      ),
+        (rng() * 2 - 1) * half,),
+      _pad0: 0,
       velocity: d.vec3f(0, 0, 0),
+      _pad1: 0,
+      acceleration: d.vec3f(0, 0, 0),
+      _pad2: 0,
+      density: 0,
+      pressure: 0,
+      _pad3: d.vec2f(0, 0),
     };
   }
   alloc.buffer.write(data);

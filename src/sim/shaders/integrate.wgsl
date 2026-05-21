@@ -1,6 +1,13 @@
 struct Particle {
   position: vec3<f32>,
+  _pad0: f32,
   velocity: vec3<f32>,
+  _pad1: f32,
+  acceleration: vec3<f32>,
+  _pad2: f32,
+  density: f32,
+  pressure: f32,
+  _pad3: vec2<f32>,
 };
 
 struct SimParams {
@@ -39,7 +46,9 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   var p = particles[idx];
 
-  p.velocity = p.velocity + params.gravity * params.dt;
+  let accel = params.gravity;
+  p.acceleration = accel;
+  p.velocity = p.velocity + accel * params.dt;
   p.position = p.position + p.velocity * params.dt;
 
   let rx = reflectAxis(p.position.x, p.velocity.x, params.boxMin.x, params.boxMax.x, params.restitution);
