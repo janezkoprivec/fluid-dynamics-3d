@@ -1,6 +1,3 @@
-import * as d from 'typegpu/data';
-import type { TgpuRoot, TgpuBuffer, StorageFlag } from 'typegpu';
-
 // GPU particle memory contract (must match WGSL `struct Particle` exactly in
 // `src/sim/shaders/integrate.wgsl` and `src/render/shaders/pointSprites.wgsl`).
 //
@@ -10,51 +7,28 @@ import type { TgpuRoot, TgpuBuffer, StorageFlag } from 'typegpu';
 //  32..47  : acceleration.xyz + _pad2
 //  48..55  : density + pressure
 //  56..63  : _pad3.xy
-//
-// Padding fields are intentional for alignment; do not remove/reorder fields
-// without updating all matching WGSL structs and upload paths.
 
-export const Particle = d.struct({
-  position: d.vec3f,
-  _pad0: d.f32,
-
-  velocity: d.vec3f,
-  _pad1: d.f32,
-
-  acceleration: d.vec3f,
-  _pad2: d.f32,
-
-  density: d.f32,
-  pressure: d.f32,
-  _pad3: d.vec2f,
-});
-export type ParticleSchema = typeof Particle;
-
-export type ParticleArraySchema = d.WgslArray<ParticleSchema>;
-export type ParticleBuffer = TgpuBuffer<ParticleArraySchema> & StorageFlag;
+export const PARTICLE_STRIDE = 64;
+export const PARTICLE_F32_STRIDE = 16;
 
 export interface ParticleAllocation {
   count: number;
-  schema: ParticleArraySchema;
-  buffer: ParticleBuffer;
   gpuBuffer: GPUBuffer;
   byteSize: number;
+  device: GPUDevice;
 }
 
 export function allocateParticles(
-  root: TgpuRoot,
+  device: GPUDevice,
   count: number,
 ): ParticleAllocation {
-  const schema = d.arrayOf(Particle, count);
-  const buffer = root.createBuffer(schema).$usage('storage');
-  const gpuBuffer = root.unwrap(buffer);
-  return {
-    count,
-    schema,
-    buffer,
-    gpuBuffer,
-    byteSize: d.sizeOf(schema),
-  };
+  const byteSize = count * PARTICLE_STRIDE;
+  const gpuBuffer = device.createBuffer({
+    label: 'particles',
+    size: byteSize,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+  return { count, gpuBuffer, byteSize, device };
 }
 
 export interface SeedOptions {
@@ -66,27 +40,17 @@ export function seedRandomCube(
   alloc: ParticleAllocation,
   opts: SeedOptions,
 ): void {
-  const { count } = alloc;
+  const { count, device, gpuBuffer } = alloc;
   const half = opts.halfExtent;
   const rng = mulberry32(opts.seed ?? 0xC0FFEE);
-  const data = new Array(count);
+  const data = new Float32Array(count * PARTICLE_F32_STRIDE);
   for (let i = 0; i < count; i++) {
-    data[i] = {
-      position: d.vec3f(
-        (rng() * 2 - 1) * half,
-        (rng() * 2 - 1) * half,
-        (rng() * 2 - 1) * half,),
-      _pad0: 0,
-      velocity: d.vec3f(0, 0, 0),
-      _pad1: 0,
-      acceleration: d.vec3f(0, 0, 0),
-      _pad2: 0,
-      density: 0,
-      pressure: 0,
-      _pad3: d.vec2f(0, 0),
-    };
+    const o = i * PARTICLE_F32_STRIDE;
+    data[o + 0] = (rng() * 2 - 1) * half;
+    data[o + 1] = (rng() * 2 - 1) * half;
+    data[o + 2] = (rng() * 2 - 1) * half;
   }
-  alloc.buffer.write(data);
+  device.queue.writeBuffer(gpuBuffer, 0, data);
 }
 
 function mulberry32(seed: number): () => number {

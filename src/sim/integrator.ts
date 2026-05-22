@@ -1,4 +1,6 @@
 import integrateWgsl from './shaders/integrate.wgsl?raw';
+import densityWgsl from './shaders/density.wgsl?raw';
+import forcesWgsl from './shaders/forces.wgsl?raw';
 import type { ParticleAllocation } from './particles';
 
 const PARAMS_BYTE_SIZE = 96;
@@ -19,6 +21,7 @@ export interface IntegratorState {
   viscosity: number;       // mu
   gamma: number;           // Tait gamma
   maxPressure: number;
+  particleMass: number;     // m
 
   gridResolution: [number, number, number]; // placeholder for hash stage
 }
@@ -65,6 +68,34 @@ export function createIntegrator(
       bindGroupLayouts: [bindGroupLayout],
     }),
     compute: { module, entryPoint: 'cs_main' },
+  });
+
+  const densityModule = device.createShaderModule({
+    label: 'density.wgsl',
+    code: densityWgsl,
+  });
+
+  const densityPipeline = device.createComputePipeline({
+    label: 'density/pipeline',
+    layout: device.createPipelineLayout({
+      label: 'density/layout',
+      bindGroupLayouts: [bindGroupLayout],
+    }),
+    compute: { module: densityModule, entryPoint: 'cs_main' },
+  });
+
+  const forcesModule = device.createShaderModule({
+    label: 'forces.wgsl',
+    code: forcesWgsl,
+  });
+
+  const forcesPipeline = device.createComputePipeline({
+    label: 'forces/pipeline',
+    layout: device.createPipelineLayout({
+      label: 'forces/layout',
+      bindGroupLayouts: [bindGroupLayout],
+    }),
+    compute: { module: forcesModule, entryPoint: 'cs_main' },
   });
 
   const paramsBuffer = device.createBuffer({
@@ -133,9 +164,9 @@ export function createIntegrator(
   
     paramsF32[16] = state.maxPressure;
     paramsF32[17] = state.boundarySlop;
-  
-    paramsU32[18] = alloc.count;
-    paramsU32[19] = 0;
+    paramsF32[18] = state.particleMass;
+    
+    paramsU32[19] = alloc.count;
     paramsU32[20] = state.gridResolution[0] >>> 0;
     paramsU32[21] = state.gridResolution[1] >>> 0;
     paramsU32[22] = state.gridResolution[2] >>> 0;
@@ -147,14 +178,34 @@ export function createIntegrator(
   return {
     encode(encoder, state, timestampWrites): void {
       writeParams(state);
-      const desc: GPUComputePassDescriptor = { label: 'integrate' };
-      if (timestampWrites) desc.timestampWrites = timestampWrites;
-      const pass = encoder.beginComputePass(desc);
-      pass.setPipeline(pipeline);
-      pass.setBindGroup(0, bindGroup);
       const groups = Math.ceil(alloc.count / WORKGROUP_SIZE);
-      pass.dispatchWorkgroups(groups);
-      pass.end();
+
+      // pass 1: density + pressure
+      {
+        const densityPass = encoder.beginComputePass({ label: 'density' });
+        densityPass.setPipeline(densityPipeline);
+        densityPass.setBindGroup(0, bindGroup);
+        densityPass.dispatchWorkgroups(groups);
+        densityPass.end();
+      }
+      // pass 2: forces
+      {
+        const forcesPass = encoder.beginComputePass({ label: 'forces' });
+        forcesPass.setPipeline(forcesPipeline);
+        forcesPass.setBindGroup(0, bindGroup);
+        forcesPass.dispatchWorkgroups(groups);
+        forcesPass.end();
+      }
+      // pass 3: existing integrate
+      {
+        const desc: GPUComputePassDescriptor = { label: 'integrate' };
+        if (timestampWrites) desc.timestampWrites = timestampWrites;
+        const pass = encoder.beginComputePass(desc);
+        pass.setPipeline(pipeline);
+        pass.setBindGroup(0, bindGroup);
+        pass.dispatchWorkgroups(groups);
+        pass.end();
+      }
     },
     rebindParticles(next): void {
       alloc = next;

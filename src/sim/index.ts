@@ -1,4 +1,3 @@
-import type { TgpuRoot } from 'typegpu';
 import {
   allocateParticles,
   seedRandomCube,
@@ -38,6 +37,7 @@ const SPH_GAMMA = 7.0;
 const SPH_MAX_PRESSURE = 40_000;
 const BOUNDARY_SLOP = 0.002;
 const GRID_RESOLUTION: [number, number, number] = [64, 64, 64];
+const PARTICLE_MASS = 1.0;
 
 export interface Sim {
   readonly params: SimParams;
@@ -53,12 +53,11 @@ export interface Sim {
 }
 
 export function createSim(
-  root: TgpuRoot,
   device: GPUDevice,
   initial: Partial<SimParams> = {},
 ): Sim {
   const params: SimParams = { ...DEFAULT_SIM_PARAMS, ...initial };
-  let alloc = allocateParticles(root, params.particleCount);
+  let alloc = allocateParticles(device, params.particleCount);
   seedRandomCube(alloc, { halfExtent: SEED_HALF_EXTENT });
 
   const integrator: Integrator = createIntegrator(device, alloc);
@@ -78,7 +77,7 @@ export function createSim(
       viscosity: SPH_VISCOSITY,
       gamma: SPH_GAMMA,
       maxPressure: SPH_MAX_PRESSURE,
-    
+      particleMass: PARTICLE_MASS,
       gridResolution: GRID_RESOLUTION,
     };
   }
@@ -98,7 +97,7 @@ export function createSim(
       if (newCount !== undefined && newCount !== params.particleCount) {
         params.particleCount = Math.max(64, Math.floor(newCount));
         alloc.gpuBuffer.destroy();
-        alloc = allocateParticles(root, params.particleCount);
+        alloc = allocateParticles(device, params.particleCount);
         integrator.rebindParticles(alloc);
       }
       seedRandomCube(alloc, { halfExtent: SEED_HALF_EXTENT });

@@ -1,5 +1,3 @@
-import tgpu from 'typegpu';
-import * as d from 'typegpu/data';
 import { acquireGpu, showFatalError } from './util/webgpu';
 import { createManagedSurface } from './util/resize';
 import {
@@ -9,7 +7,7 @@ import {
   SIM_BOX_MIN,
   type SimParams,
 } from './sim';
-import { allocateParticles } from './sim/particles';
+import { allocateParticles, PARTICLE_F32_STRIDE } from './sim/particles';
 import {
   createRenderer,
   type RenderParams,
@@ -46,19 +44,19 @@ async function run(): Promise<void> {
     throw new Error('missing DOM elements: #gfx / #stats / #timings');
   }
 
-  const { device, hasTimestampQuery } = await acquireGpu();
+  const gpu = await acquireGpu();
+  const { device, hasTimestampQuery } = gpu;
   const context = canvas.getContext('webgpu');
   if (!context) throw new Error('failed to acquire WebGPU canvas context');
 
-  const root = tgpu.initFromDevice({ device });
   const surfaceFormat = navigator.gpu.getPreferredCanvasFormat();
   const surface = createManagedSurface(device, context, canvas, surfaceFormat);
 
-  const sim = createSim(root, device, DEFAULT_SIM_PARAMS);
+  const sim = createSim(device, DEFAULT_SIM_PARAMS);
   const renderer = createRenderer(device, surfaceFormat, sim.allocation);
   let source: SimulationSource = 'gpu';
 
-  let referenceAlloc = allocateParticles(root, sim.params.particleCount);
+  let referenceAlloc = allocateParticles(device, sim.params.particleCount);
   let referenceSim = new CpuReferenceSim(toReferenceParams(sim.params));
   uploadReferenceParticles();
 
@@ -103,6 +101,13 @@ async function run(): Promise<void> {
 
   let lastT = performance.now();
   let running = true;
+
+  gpu.onLost(() => {
+    // Stop the rAF loop the instant the device dies. Continuing to call into a
+    // dead device is what frequently turns a recoverable device-loss into a
+    // full content-process crash on Firefox Nightly.
+    running = false;
+  });
 
   function frame(now: number): void {
     if (!running) return;
@@ -151,7 +156,10 @@ async function run(): Promise<void> {
 
   requestAnimationFrame(frame);
 
-  window.addEventListener('beforeunload', () => {
+  let disposed = false;
+  function teardown(): void {
+    if (disposed) return;
+    disposed = true;
     running = false;
     detachCamera();
     gui.dispose();
@@ -161,12 +169,17 @@ async function run(): Promise<void> {
     referenceAlloc.gpuBuffer.destroy();
     timing.dispose();
     surface.dispose();
-    root.destroy();
-  });
+    try { context!.unconfigure(); } catch { /* may already be torn down */ }
+    try { device.destroy(); } catch { /* already lost */ }
+  }
+  // pagehide is far more reliable than beforeunload in modern browsers,
+  // and fires for both navigation away and full reloads.
+  window.addEventListener('pagehide', teardown);
+  window.addEventListener('beforeunload', teardown);
 
   function rebuildReference(count: number): void {
     referenceAlloc.gpuBuffer.destroy();
-    referenceAlloc = allocateParticles(root, Math.max(64, Math.floor(count)));
+    referenceAlloc = allocateParticles(device, Math.max(64, Math.floor(count)));
     referenceSim = new CpuReferenceSim(
       toReferenceParams({
         ...sim.params,
@@ -179,30 +192,23 @@ async function run(): Promise<void> {
 
   function uploadReferenceParticles(): void {
     const particles = referenceSim.getParticles();
-    const data = new Array(referenceAlloc.count);
-    for (let i = 0; i < referenceAlloc.count; i++) {
+    const count = referenceAlloc.count;
+    const data = new Float32Array(count * PARTICLE_F32_STRIDE);
+    for (let i = 0; i < count; i++) {
       const p = particles[i];
-      data[i] = {
-        position: d.vec3f(
-          p?.position.x ?? 0,
-          p?.position.y ?? 0,
-          p?.position.z ?? 0,
-        ),
-        _pad0: 0,
-        velocity: d.vec3f(
-          p?.velocity.x ?? 0,
-          p?.velocity.y ?? 0,
-          p?.velocity.z ?? 0,
-        ),
-        _pad1: 0,
-        acceleration: d.vec3f(0, 0, 0),
-        _pad2: 0,
-        density: p?.density ?? 0,
-        pressure: p?.pressure ?? 0,
-        _pad3: d.vec2f(0, 0),
-      };
+      if (!p) continue;
+      const o = i * PARTICLE_F32_STRIDE;
+      data[o + 0] = p.position.x;
+      data[o + 1] = p.position.y;
+      data[o + 2] = p.position.z;
+      data[o + 4] = p.velocity.x;
+      data[o + 5] = p.velocity.y;
+      data[o + 6] = p.velocity.z;
+      // acceleration (o+8..10) left zero — GPU integrator overwrites it
+      data[o + 12] = p.density ?? 0;
+      data[o + 13] = p.pressure ?? 0;
     }
-    referenceAlloc.buffer.write(data);
+    device.queue.writeBuffer(referenceAlloc.gpuBuffer, 0, data);
   }
 }
 

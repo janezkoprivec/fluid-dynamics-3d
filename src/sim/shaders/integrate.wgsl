@@ -27,8 +27,8 @@ struct SimParams {
 
   maxPressure: f32,
   boundarySlop: f32,
+  particleMass: f32,
   particleCount: u32,
-  _pad0: u32,
 
   gridResolution: vec3<u32>,
   _pad1: u32,
@@ -61,8 +61,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   var p = particles[idx];
 
-  let accel = params.gravity;
-  p.acceleration = accel;
+  let accel = p.acceleration;
   p.velocity = p.velocity + accel * params.dt;
   p.position = p.position + p.velocity * params.dt;
 
