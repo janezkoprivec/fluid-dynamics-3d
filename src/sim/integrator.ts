@@ -2,6 +2,7 @@ import integrateWgsl from './shaders/integrate.wgsl?raw';
 import densityWgsl from './shaders/density.wgsl?raw';
 import forcesWgsl from './shaders/forces.wgsl?raw';
 import type { ParticleAllocation } from './particles';
+import { createSpatialHash, type SpatialHash } from './spatialHash';
 
 const PARAMS_BYTE_SIZE = 112;
 const WORKGROUP_SIZE = 64;
@@ -111,8 +112,11 @@ export function createIntegrator(
   const paramsF32 = new Float32Array(paramsHost);
   const paramsU32 = new Uint32Array(paramsHost);
 
+
   let alloc = initialAlloc;
   let bindGroup = createBindGroup();
+
+  let spatialHash: SpatialHash = createSpatialHash(device, alloc, paramsBuffer);
 
   function createBindGroup(): GPUBindGroup {
     return device.createBindGroup({
@@ -194,6 +198,8 @@ export function createIntegrator(
       writeParams(state);
       const groups = Math.ceil(alloc.count / WORKGROUP_SIZE);
 
+      spatialHash.encode(encoder, state.gridResolution);
+
       // pass 1: density + pressure
       {
         const densityPass = encoder.beginComputePass({ label: 'density' });
@@ -224,8 +230,10 @@ export function createIntegrator(
     rebindParticles(next): void {
       alloc = next;
       bindGroup = createBindGroup();
+      spatialHash.rebindParticles(next);
     },
     dispose(): void {
+      spatialHash.dispose();
       paramsBuffer.destroy();
     },
   };
