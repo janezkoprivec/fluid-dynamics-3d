@@ -57,6 +57,16 @@ export function createGui(
     restitution: sim.restitution,
     timestep: sim.timestep,
     paused: sim.paused,
+    particleMass: sim.particleMass,
+    smoothingRadius: sim.smoothingRadius,
+    restDensity: sim.restDensity,
+    gasConstant: sim.gasConstant,
+    viscosity: sim.viscosity,
+    gamma: sim.gamma,
+    maxPressure: sim.maxPressure,
+    wallRepulsion: sim.wallRepulsion,
+    wallDamping: sim.wallDamping,
+    wallRange: sim.wallRange,
   };
 
   function currentSimParams(): SimParams {
@@ -66,6 +76,16 @@ export function createGui(
       restitution: simState.restitution,
       timestep: simState.timestep,
       paused: simState.paused,
+      particleMass: simState.particleMass,
+      smoothingRadius: simState.smoothingRadius,
+      restDensity: simState.restDensity,
+      gasConstant: simState.gasConstant,
+      viscosity: simState.viscosity,
+      gamma: simState.gamma,
+      maxPressure: simState.maxPressure,
+      wallRepulsion: simState.wallRepulsion,
+      wallDamping: simState.wallDamping,
+      wallRange: simState.wallRange,
     };
   }
 
@@ -111,6 +131,10 @@ export function createGui(
     min: 64,
     max: 262_144,
     step: 64,
+  }).on('change', (ev) => {
+    if (applyingPreset) return;
+    if (!ev.last) return;
+    cb.onReset(simState.particleCount);
   });
   simFolder.addBinding(simState, 'gravity', {
     label: 'Gravity',
@@ -131,6 +155,71 @@ export function createGui(
     step: 0.0001,
   });
   simFolder.addBinding(simState, 'paused', { label: 'Paused' });
+
+  const sphFolder = simFolder.addFolder({ title: 'SPH', expanded: false });
+  sphFolder.addBinding(simState, 'particleMass', {
+    label: 'Mass',
+    min: 0.001,
+    max: 1.0,
+    step: 0.001,
+  });
+  sphFolder.addBinding(simState, 'smoothingRadius', {
+    label: 'Smoothing h',
+    min: 0.01,
+    max: 0.5,
+    step: 0.005,
+  });
+  sphFolder.addBinding(simState, 'restDensity', {
+    label: 'Rest density',
+    min: 100,
+    max: 4000,
+    step: 10,
+  });
+  sphFolder.addBinding(simState, 'gasConstant', {
+    label: 'Gas constant k',
+    min: 1,
+    max: 5000,
+    step: 1,
+  });
+  sphFolder.addBinding(simState, 'viscosity', {
+    label: 'Viscosity',
+    min: 0,
+    max: 50,
+    step: 0.1,
+  });
+  sphFolder.addBinding(simState, 'gamma', {
+    label: 'Tait gamma',
+    min: 1,
+    max: 10,
+    step: 0.1,
+  });
+  sphFolder.addBinding(simState, 'maxPressure', {
+    label: 'Max pressure',
+    min: 1000,
+    max: 200_000,
+    step: 1000,
+  });
+
+  const wallFolder = simFolder.addFolder({ title: 'Walls', expanded: false });
+  wallFolder.addBinding(simState, 'wallRepulsion', {
+    label: 'Repulsion K',
+    min: 0,
+    max: 200,
+    step: 1,
+  });
+  wallFolder.addBinding(simState, 'wallDamping', {
+    label: 'Damping c',
+    min: 0,
+    max: 40,
+    step: 0.1,
+  });
+  wallFolder.addBinding(simState, 'wallRange', {
+    label: 'Range (× h)',
+    min: 0,
+    max: 3,
+    step: 0.05,
+  });
+
   simFolder.addButton({ title: 'Reset' }).on('click', () => {
     cb.onReset(simState.particleCount);
   });

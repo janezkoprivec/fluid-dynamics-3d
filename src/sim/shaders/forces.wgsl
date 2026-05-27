@@ -31,7 +31,12 @@ struct SimParams {
   particleCount: u32,
 
   gridResolution: vec3<u32>,
-  _pad1: u32,
+  wallRepulsion: f32,
+
+  wallDamping: f32,
+  wallRange: f32,
+  _pad0: f32,
+  _pad1: f32,
 };
 
 @group(0) @binding(0) var<storage, read_write> particles: array<Particle>;

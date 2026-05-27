@@ -1,6 +1,6 @@
 import {
   allocateParticles,
-  seedRandomCube,
+  seedPackedCube,
   type ParticleAllocation,
 } from './particles';
 import {
@@ -15,29 +15,64 @@ export interface SimParams {
   restitution: number;
   timestep: number;
   paused: boolean;
+
+  particleMass: number;
+  smoothingRadius: number;
+  restDensity: number;
+  gasConstant: number;
+  viscosity: number;
+  gamma: number;
+  maxPressure: number;
+
+  // Boundary handling. Within `wallRange * smoothingRadius` of any wall,
+  // particles feel:
+  //   - outward acceleration `wallRepulsion * t^2`,
+  //   - normal-velocity damping `wallDamping * v_n * t` opposing motion
+  //     into the wall. The damper kills the bounce that pure repulsion
+  //     would otherwise produce.
+  // `t` ramps from 0 at the band edge to 1 at the wall.
+  wallRepulsion: number;
+  wallDamping: number;
+  wallRange: number;
 }
 
 export const DEFAULT_SIM_PARAMS: SimParams = {
   particleCount: 1536,
   gravity: [0, -9.81, 0],
-  restitution: 0.4,
-  timestep: 1 / 120,
+  restitution: 0.12,
+  timestep: 1 / 240,
   paused: false,
+
+  particleMass: 0.05,
+  smoothingRadius: 0.1,
+  restDensity: 1000,
+  gasConstant: 300,
+  viscosity: 8.0,
+  gamma: 7.0,
+  maxPressure: 40_000,
+
+  wallRepulsion: 25.0,
+  wallDamping: 6.0,
+  wallRange: 1.0,
 };
+
+const MAX_SUBSTEP_DT = 1 / 480;
 
 export const SIM_BOX_MIN: [number, number, number] = [-0.42, -0.42, -0.42];
 export const SIM_BOX_MAX: [number, number, number] = [0.42, 0.42, 0.42];
 const SEED_HALF_EXTENT = 0.21;
+// Place the packed-cube seed in the bottom-back-left corner of the sim box,
+// padded by `SEED_WALL_PAD` so particles don't spawn inside the wall
+// repulsion zone (must be ≥ smoothingRadius to avoid an initial kick).
+const SEED_WALL_PAD = 0.1;
+const SEED_ORIGIN_MIN: [number, number, number] = [
+  SIM_BOX_MIN[0] + SEED_WALL_PAD,
+  SIM_BOX_MIN[1] + SEED_WALL_PAD,
+  SIM_BOX_MIN[2] + SEED_WALL_PAD,
+];
 
-const SPH_SMOOTHING_RADIUS = 0.1;
-const SPH_REST_DENSITY = 1000;
-const SPH_GAS_CONSTANT = 800;
-const SPH_VISCOSITY = 2.0;
-const SPH_GAMMA = 7.0;
-const SPH_MAX_PRESSURE = 40_000;
 const BOUNDARY_SLOP = 0.002;
 const GRID_RESOLUTION: [number, number, number] = [64, 64, 64];
-const PARTICLE_MASS = 1.0;
 
 export interface Sim {
   readonly params: SimParams;
@@ -58,7 +93,10 @@ export function createSim(
 ): Sim {
   const params: SimParams = { ...DEFAULT_SIM_PARAMS, ...initial };
   let alloc = allocateParticles(device, params.particleCount);
-  seedRandomCube(alloc, { halfExtent: SEED_HALF_EXTENT });
+  seedPackedCube(alloc, {
+    halfExtent: SEED_HALF_EXTENT,
+    originMin: SEED_ORIGIN_MIN,
+  });
 
   const integrator: Integrator = createIntegrator(device, alloc);
 
@@ -70,15 +108,19 @@ export function createSim(
       boxMax: SIM_BOX_MAX,
       boundaryDamping: params.restitution,
       boundarySlop: BOUNDARY_SLOP,
-    
-      smoothingRadius: SPH_SMOOTHING_RADIUS,
-      restDensity: SPH_REST_DENSITY,
-      gasConstant: SPH_GAS_CONSTANT,
-      viscosity: SPH_VISCOSITY,
-      gamma: SPH_GAMMA,
-      maxPressure: SPH_MAX_PRESSURE,
-      particleMass: PARTICLE_MASS,
+
+      smoothingRadius: params.smoothingRadius,
+      restDensity: params.restDensity,
+      gasConstant: params.gasConstant,
+      viscosity: params.viscosity,
+      gamma: params.gamma,
+      maxPressure: params.maxPressure,
+      particleMass: params.particleMass,
       gridResolution: GRID_RESOLUTION,
+
+      wallRepulsion: params.wallRepulsion,
+      wallDamping: params.wallDamping,
+      wallRange: params.wallRange,
     };
   }
 
@@ -90,8 +132,17 @@ export function createSim(
       return alloc;
     },
     step(encoder, dt, timestampWrites): void {
-      if (params.paused) return;
-      integrator.encode(encoder, currentIntegratorState(dt), timestampWrites);
+      if (params.paused || dt <= 0) return;
+      const substeps = Math.max(1, Math.ceil(dt / MAX_SUBSTEP_DT));
+      const subDt = dt / substeps;
+      for (let s = 0; s < substeps; s++) {
+        const isLast = s === substeps - 1;
+        integrator.encode(
+          encoder,
+          currentIntegratorState(subDt),
+          isLast ? timestampWrites : undefined,
+        );
+      }
     },
     reset(newCount): void {
       if (newCount !== undefined && newCount !== params.particleCount) {
@@ -100,7 +151,10 @@ export function createSim(
         alloc = allocateParticles(device, params.particleCount);
         integrator.rebindParticles(alloc);
       }
-      seedRandomCube(alloc, { halfExtent: SEED_HALF_EXTENT });
+      seedPackedCube(alloc, {
+        halfExtent: SEED_HALF_EXTENT,
+        originMin: SEED_ORIGIN_MIN,
+      });
     },
     setParams(patch): void {
       Object.assign(params, patch);

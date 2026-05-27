@@ -215,11 +215,13 @@ async function run(): Promise<void> {
 function toReferenceParams(sim: SimParams): ReferenceSimParams {
   return {
     particleCount: sim.particleCount,
-    smoothingRadius: 0.1,
-    restDensity: 1000,
-    gasConstant: 800,
-    maxPressure: 40_000,
-    viscosity: 2.0,
+    smoothingRadius: sim.smoothingRadius,
+    mass: sim.particleMass,
+    restDensity: sim.restDensity,
+    gasConstant: sim.gasConstant,
+    maxPressure: sim.maxPressure,
+    viscosity: sim.viscosity,
+    gamma: sim.gamma,
     gravity: {
       x: sim.gravity[0],
       y: sim.gravity[1],
