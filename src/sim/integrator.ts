@@ -66,6 +66,15 @@ export function createIntegrator(
     ],
   });
 
+  const neighborBindGroupLayout = device.createBindGroupLayout({
+    label: 'integrator/neighbors-bgl',
+    entries: [
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } }, // sortedEntries
+      { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } }, // cellStart
+      { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } }, // cellEnd
+    ],
+  });
+
   const pipeline = device.createComputePipeline({
     label: 'integrator/pipeline',
     layout: device.createPipelineLayout({
@@ -84,7 +93,7 @@ export function createIntegrator(
     label: 'density/pipeline',
     layout: device.createPipelineLayout({
       label: 'density/layout',
-      bindGroupLayouts: [bindGroupLayout],
+      bindGroupLayouts: [bindGroupLayout, neighborBindGroupLayout],
     }),
     compute: { module: densityModule, entryPoint: 'cs_main' },
   });
@@ -98,7 +107,7 @@ export function createIntegrator(
     label: 'forces/pipeline',
     layout: device.createPipelineLayout({
       label: 'forces/layout',
-      bindGroupLayouts: [bindGroupLayout],
+      bindGroupLayouts: [bindGroupLayout, neighborBindGroupLayout],
     }),
     compute: { module: forcesModule, entryPoint: 'cs_main' },
   });
@@ -112,11 +121,14 @@ export function createIntegrator(
   const paramsF32 = new Float32Array(paramsHost);
   const paramsU32 = new Uint32Array(paramsHost);
 
+  
+
 
   let alloc = initialAlloc;
   let bindGroup = createBindGroup();
 
   let spatialHash: SpatialHash = createSpatialHash(device, alloc, paramsBuffer);
+  let neighborBindGroup = createNeighborBindGroup();
 
   function createBindGroup(): GPUBindGroup {
     return device.createBindGroup({
@@ -125,6 +137,19 @@ export function createIntegrator(
       entries: [
         { binding: 0, resource: { buffer: alloc.gpuBuffer } },
         { binding: 1, resource: { buffer: paramsBuffer } },
+      ],
+    });
+  }
+
+  function createNeighborBindGroup(): GPUBindGroup {
+    const r = spatialHash.resources();
+    return device.createBindGroup({
+      label: 'integrator/neighbors-bg',
+      layout: neighborBindGroupLayout,
+      entries: [
+        { binding: 2, resource: { buffer: r.sortedEntries } },
+        { binding: 3, resource: { buffer: r.cellStart } },
+        { binding: 4, resource: { buffer: r.cellEnd } },
       ],
     });
   }
@@ -199,12 +224,14 @@ export function createIntegrator(
       const groups = Math.ceil(alloc.count / WORKGROUP_SIZE);
 
       spatialHash.encode(encoder, state.gridResolution);
+      neighborBindGroup = createNeighborBindGroup();
 
       // pass 1: density + pressure
       {
         const densityPass = encoder.beginComputePass({ label: 'density' });
         densityPass.setPipeline(densityPipeline);
         densityPass.setBindGroup(0, bindGroup);
+        densityPass.setBindGroup(1, neighborBindGroup);
         densityPass.dispatchWorkgroups(groups);
         densityPass.end();
       }
@@ -213,6 +240,7 @@ export function createIntegrator(
         const forcesPass = encoder.beginComputePass({ label: 'forces' });
         forcesPass.setPipeline(forcesPipeline);
         forcesPass.setBindGroup(0, bindGroup);
+        forcesPass.setBindGroup(1, neighborBindGroup);
         forcesPass.dispatchWorkgroups(groups);
         forcesPass.end();
       }
@@ -231,6 +259,7 @@ export function createIntegrator(
       alloc = next;
       bindGroup = createBindGroup();
       spatialHash.rebindParticles(next);
+      neighborBindGroup = createNeighborBindGroup();
     },
     dispose(): void {
       spatialHash.dispose();

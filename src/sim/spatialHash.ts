@@ -15,9 +15,16 @@ function nextPow2(n: number): number {
   return Math.max(1, p);
 }
 
+export interface SpatialHashResources {
+  sortedEntries: GPUBuffer; // hashEntriesB (sorted by cellId)
+  cellStart: GPUBuffer;
+  cellEnd: GPUBuffer;
+}
+
 export interface SpatialHash {
   encode(encoder: GPUCommandEncoder, gridResolution: [number, number, number]): void;
   rebindParticles(alloc: ParticleAllocation): void;
+  resources(): SpatialHashResources;
   dispose(): void;
 }
 
@@ -265,6 +272,14 @@ export function createSpatialHash(
       if (paddedChanged) {
         writeStagesForPaddedCount();
       }
+    },
+
+    resources(): SpatialHashResources {
+      return {
+        sortedEntries: hashEntriesB,
+        cellStart: cellStart,
+        cellEnd: cellEnd,
+      };
     },
 
     dispose(): void {
