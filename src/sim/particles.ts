@@ -27,9 +27,33 @@ export function allocateParticles(
   const gpuBuffer = device.createBuffer({
     label: 'particles',
     size: byteSize,
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    usage:
+      GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
   });
   return { count, gpuBuffer, byteSize, device };
+}
+
+// Read the particle buffer back to a host-side Float32Array. The layout is
+// `PARTICLE_F32_STRIDE` floats per particle (see byte-offset table at the top
+// of this file). Allocates and destroys a transient staging buffer each call —
+// intended for diagnostics / parity harnesses, not per-frame use.
+export async function readbackParticles(
+  alloc: ParticleAllocation,
+): Promise<Float32Array> {
+  const { device, gpuBuffer, byteSize } = alloc;
+  const staging = device.createBuffer({
+    label: 'particles/readback',
+    size: byteSize,
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+  });
+  const encoder = device.createCommandEncoder({ label: 'particles/readback' });
+  encoder.copyBufferToBuffer(gpuBuffer, 0, staging, 0, byteSize);
+  device.queue.submit([encoder.finish()]);
+  await staging.mapAsync(GPUMapMode.READ);
+  const copy = new Float32Array(staging.getMappedRange().slice(0));
+  staging.unmap();
+  staging.destroy();
+  return copy;
 }
 
 export interface SeedOptions {

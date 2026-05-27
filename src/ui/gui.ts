@@ -30,6 +30,7 @@ export interface GuiCallbacks {
   onSimChange: (params: SimParams) => void;
   onRenderChange: (params: RenderParams) => void;
   onSourceChange: (source: SimulationSource) => void;
+  onParityRun?: () => void;
 }
 
 export interface Gui {
@@ -223,6 +224,12 @@ export function createGui(
   simFolder.addButton({ title: 'Reset' }).on('click', () => {
     cb.onReset(simState.particleCount);
   });
+
+  if (cb.onParityRun) {
+    simFolder.addButton({ title: 'Run parity test (CPU↔GPU)' }).on('click', () => {
+      cb.onParityRun?.();
+    });
+  }
 
   simFolder.on('change', () => {
     if (applyingPreset) return;

@@ -7,7 +7,11 @@ import {
   SIM_BOX_MIN,
   type SimParams,
 } from './sim';
-import { allocateParticles, PARTICLE_F32_STRIDE } from './sim/particles';
+import {
+  allocateParticles,
+  PARTICLE_F32_STRIDE,
+  readbackParticles,
+} from './sim/particles';
 import {
   createRenderer,
   type RenderParams,
@@ -17,7 +21,20 @@ import {
   type SimulationSource,
 } from './ui/gui';
 import { createStats } from './ui/stats';
-import { CpuReferenceSim, type ReferenceSimParams } from './reference';
+import {
+  CpuReferenceSim,
+  compareParitySamples,
+  DEFAULT_PARITY_TOLERANCE,
+  sampleParityFromGpuBuffer,
+  sampleParityFromReference,
+  type ParityComparison,
+  type ReferenceParticle,
+  type ReferenceSimParams,
+} from './reference';
+
+const PARITY_STEPS = 600;
+const PARITY_SAMPLE_EVERY = 30;
+const PARITY_DT = 1 / 240;
 
 export interface App {
   start(): Promise<void>;
@@ -70,6 +87,7 @@ async function run(): Promise<void> {
   }
 
   const stats = createStats(statsHost, timingsHost);
+  let parityRunning = false;
   const gui = createGui(sim.params, renderer.params, source, {
     onReset(count: number): void {
       if (source === 'gpu') {
@@ -94,6 +112,12 @@ async function run(): Promise<void> {
     onSourceChange(next: SimulationSource): void {
       source = next;
       renderer.rebindParticles(source === 'gpu' ? sim.allocation : referenceAlloc);
+    },
+    onParityRun(): void {
+      if (parityRunning) return;
+      runParityTest().catch((err) => {
+        console.error('[Parity] aborted:', err);
+      });
     },
   });
 
@@ -123,7 +147,9 @@ async function run(): Promise<void> {
     const encoder = device.createCommandEncoder({ label: 'frame' });
 
     const simMarks = timing.markSim();
-    if (source === 'gpu') {
+    if (parityRunning) {
+      // Parity harness drives both sims itself; the rAF loop only renders.
+    } else if (source === 'gpu') {
       sim.step(encoder, dt, simMarks.gpu);
     } else if (dt > 0) {
       referenceSim.step(dt);
@@ -191,8 +217,18 @@ async function run(): Promise<void> {
   }
 
   function uploadReferenceParticles(): void {
-    const particles = referenceSim.getParticles();
-    const count = referenceAlloc.count;
+    writeParticlesToBuffer(
+      referenceAlloc.gpuBuffer,
+      referenceSim.getParticles(),
+      referenceAlloc.count,
+    );
+  }
+
+  function writeParticlesToBuffer(
+    buffer: GPUBuffer,
+    particles: ReadonlyArray<ReferenceParticle>,
+    count: number,
+  ): void {
     const data = new Float32Array(count * PARTICLE_F32_STRIDE);
     for (let i = 0; i < count; i++) {
       const p = particles[i];
@@ -208,8 +244,147 @@ async function run(): Promise<void> {
       data[o + 12] = p.density ?? 0;
       data[o + 13] = p.pressure ?? 0;
     }
-    device.queue.writeBuffer(referenceAlloc.gpuBuffer, 0, data);
+    device.queue.writeBuffer(buffer, 0, data);
   }
+
+  // Lockstep CPU reference and GPU sim from an identical particle seed and
+  // emit aggregate (min/avg/max density, max speed, KE, |P|) comparisons every
+  // PARITY_SAMPLE_EVERY steps. Validates step-3 GPU math against the CPU
+  // oracle; rAF render keeps running but the sim step is suspended.
+  //
+  // Boundary alignment: GPU normally adds a wall-repulsion band on top of the
+  // plane-collision reflect, and CPU damps tangential velocity at impact —
+  // neither has a counterpart on the other side. Both are zeroed for the test
+  // and restored in `finally`, so we're comparing SPH math (density, pressure,
+  // viscosity, integration) and not boundary-model divergence.
+  async function runParityTest(): Promise<void> {
+    parityRunning = true;
+    const wasPaused = sim.params.paused;
+    const previousSource = source;
+
+    // Snapshot any param we will mutate. `finally` restores from these.
+    const savedSimParams = {
+      wallRepulsion: sim.params.wallRepulsion,
+      wallDamping: sim.params.wallDamping,
+      wallRange: sim.params.wallRange,
+    };
+    const savedRefParams = {
+      maxSubstepDt: referenceSim.getParams().maxSubstepDt,
+      boundaryTangentialDamping:
+        referenceSim.getParams().boundaryTangentialDamping,
+    };
+
+    try {
+      // The GPU buffer count is fixed at construction. If the CPU reference
+      // was resized away from it, realign before lockstep stepping.
+      if (referenceAlloc.count !== sim.allocation.count) {
+        rebuildReference(sim.allocation.count);
+      }
+
+      // Align stepping and boundary models so the harness measures SPH math,
+      // not known-different secondary effects.
+      sim.setParams({ wallRepulsion: 0, wallDamping: 0, wallRange: 0 });
+      referenceSim.setParams({
+        maxSubstepDt: 1 / 480, // matches GPU's MAX_SUBSTEP_DT
+        boundaryTangentialDamping: 1.0, // GPU integrator has no tangent decay
+      });
+
+      // Use the CPU dam-break scenario as the canonical seed for both sims.
+      referenceSim.resetDamBreak();
+      const seedParticles = referenceSim.getParticles().map(cloneParticle);
+      const count = Math.min(seedParticles.length, sim.allocation.count);
+      writeParticlesToBuffer(sim.allocation.gpuBuffer, seedParticles, count);
+      // Reset CPU sim to a freshly cloned copy so step 0 is identical to GPU.
+      referenceSim.resetWithParticles(seedParticles.map(cloneParticle));
+
+      // Keep the renderer pointing at whichever side the user already had up;
+      // the parity loop drives both regardless of `source`.
+      const mass = sim.params.particleMass;
+      const comparisons: ParityComparison[] = [];
+
+      console.group(
+        `[Parity] ${PARITY_STEPS} steps · dt=${PARITY_DT.toFixed(5)} · ` +
+          `N=${count} · sample every ${PARITY_SAMPLE_EVERY} ` +
+          `(walls zeroed, substep=1/480)`,
+      );
+
+      // sim.step bails when paused; force-run for the parity loop. The
+      // `finally` block restores the user's previous paused state.
+      sim.setParams({ paused: false });
+
+      for (let step = 1; step <= PARITY_STEPS; step++) {
+        referenceSim.step(PARITY_DT);
+
+        const encoder = device.createCommandEncoder({
+          label: `parity/step-${step}`,
+        });
+        sim.step(encoder, PARITY_DT);
+        device.queue.submit([encoder.finish()]);
+
+        if (step % PARITY_SAMPLE_EVERY === 0 || step === PARITY_STEPS) {
+          // readbackParticles submits its own copy command after the sim work;
+          // queue ordering guarantees it observes the post-step buffer.
+          const gpuData = await readbackParticles(sim.allocation);
+          const cpuSample = sampleParityFromReference(
+            step,
+            referenceSim.getParticles(),
+            mass,
+          );
+          const gpuSample = sampleParityFromGpuBuffer(
+            step,
+            gpuData,
+            count,
+            PARTICLE_F32_STRIDE,
+            mass,
+          );
+          const cmp = compareParitySamples(
+            cpuSample,
+            gpuSample,
+            DEFAULT_PARITY_TOLERANCE,
+          );
+          comparisons.push(cmp);
+          logParitySample(cmp);
+        }
+      }
+
+      const passed = comparisons.filter((c) => c.pass).length;
+      console.log(
+        `[Parity] ${passed}/${comparisons.length} samples within tolerance`,
+      );
+      console.groupEnd();
+    } finally {
+      parityRunning = false;
+      sim.setParams({ paused: wasPaused, ...savedSimParams });
+      referenceSim.setParams(savedRefParams);
+      // Both sims are now in the post-parity state. Honor the previous source
+      // so the renderer shows whichever buffer the user was looking at.
+      source = previousSource;
+      renderer.rebindParticles(
+        source === 'gpu' ? sim.allocation : referenceAlloc,
+      );
+    }
+  }
+}
+
+function cloneParticle(p: ReferenceParticle): ReferenceParticle {
+  return {
+    position: { x: p.position.x, y: p.position.y, z: p.position.z },
+    velocity: { x: p.velocity.x, y: p.velocity.y, z: p.velocity.z },
+    density: p.density,
+    pressure: p.pressure,
+  };
+}
+
+function logParitySample(cmp: ParityComparison): void {
+  const m = cmp.metrics;
+  const tag = cmp.pass ? 'OK ' : 'OUT';
+  const fmt = (r: { cpu: number; gpu: number; relDiff: number }): string =>
+    `${r.cpu.toExponential(3)}→${r.gpu.toExponential(3)} (Δ ${(r.relDiff * 100).toFixed(2)}%)`;
+  console.log(
+    `[Parity ${tag}] step=${String(cmp.step).padStart(4)} ` +
+      `ρ_min=${fmt(m.minDensity)} ρ_avg=${fmt(m.avgDensity)} ρ_max=${fmt(m.maxDensity)} ` +
+      `|v|max=${fmt(m.maxSpeed)} KE=${fmt(m.kineticEnergy)} |P|=${fmt(m.momentumMag)}`,
+  );
 }
 
 function toReferenceParams(sim: SimParams): ReferenceSimParams {
