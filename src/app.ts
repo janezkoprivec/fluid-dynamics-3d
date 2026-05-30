@@ -20,6 +20,7 @@ import {
   createGui,
   type SimulationSource,
 } from './ui/gui';
+import type { SurfaceParams } from './surface';
 import { createStats } from './ui/stats';
 import {
   CpuReferenceSim,
@@ -31,6 +32,8 @@ import {
   type ReferenceParticle,
   type ReferenceSimParams,
 } from './reference';
+import { createSurfacePipeline } from './surface';
+import { createScenarioManager, type ScenarioId } from './scenarios';
 
 const PARITY_STEPS = 600;
 const PARITY_SAMPLE_EVERY = 30;
@@ -71,7 +74,30 @@ async function run(): Promise<void> {
 
   const sim = createSim(device, DEFAULT_SIM_PARAMS);
   const renderer = createRenderer(device, surfaceFormat, sim.allocation);
+  const surfacePipeline = createSurfacePipeline(device, sim.allocation, () => ({
+    smoothingRadius: sim.params.smoothingRadius,
+    particleMass: sim.params.particleMass,
+    restDensity: sim.params.restDensity,
+    // Use activeCount, not buffer capacity — otherwise the surface
+    // field-build sums density over stashed slots too, which (if anything
+    // ever races those slots' positions) gives ghost geometry mid-air.
+    particleCount: sim.activeCount,
+  }));
+  syncSurfaceBinding();
   let source: SimulationSource = 'gpu';
+
+  const scenarioManager = createScenarioManager();
+  function scenarioCtx(): { sim: typeof sim; surface: typeof surfacePipeline; renderer: typeof renderer } {
+    return { sim, surface: surfacePipeline, renderer };
+  }
+
+  function syncSurfaceBinding(): void {
+    if (surfacePipeline.params.enabled) {
+      renderer.rebindSurface(surfacePipeline.meshBinding());
+    } else {
+      renderer.clearSurfaceBinding();
+    }
+  }
 
   let referenceAlloc = allocateParticles(device, sim.params.particleCount);
   let referenceSim = new CpuReferenceSim(toReferenceParams(sim.params));
@@ -88,17 +114,26 @@ async function run(): Promise<void> {
 
   const stats = createStats(statsHost, timingsHost);
   let parityRunning = false;
-  const gui = createGui(sim.params, renderer.params, source, {
+  const gui = createGui(sim.params, renderer.params, surfacePipeline.params, source, scenarioManager.list(), {
     onReset(count: number): void {
       if (source === 'gpu') {
         sim.reset(count);
         renderer.rebindParticles(sim.allocation);
+        surfacePipeline.rebindParticles(sim.allocation);
+        syncSurfaceBinding();
         return;
       }
       rebuildReference(count);
     },
     onSimChange(next: SimParams): void {
       sim.setParams(next);
+      surfacePipeline.setSimParams({
+        smoothingRadius: next.smoothingRadius,
+        particleMass: next.particleMass,
+        restDensity: next.restDensity,
+        particleCount: next.particleCount,
+      });
+
       if (next.particleCount !== referenceAlloc.count) {
         rebuildReference(next.particleCount);
         return;
@@ -109,15 +144,42 @@ async function run(): Promise<void> {
     onRenderChange(next: RenderParams): void {
       renderer.setParams(next);
     },
+    onSurfaceChange(next: SurfaceParams): void {
+      surfacePipeline.setParams(next);
+      // Grid / capacity edits may have allocated new buffers; resync binding.
+      syncSurfaceBinding();
+    },
     onSourceChange(next: SimulationSource): void {
       source = next;
       renderer.rebindParticles(source === 'gpu' ? sim.allocation : referenceAlloc);
+      // The surface pipeline reads the GPU sim buffer; with the CPU reference
+      // we have no live particle source for it.
+      if (source === 'gpu') {
+        syncSurfaceBinding();
+      } else {
+        renderer.clearSurfaceBinding();
+      }
     },
     onParityRun(): void {
       if (parityRunning) return;
       runParityTest().catch((err) => {
         console.error('[Parity] aborted:', err);
       });
+    },
+    onScenarioStart(id: ScenarioId): void {
+      scenarioManager.start(id, scenarioCtx());
+      // The scenario may have resized the buffer and toggled the surface;
+      // refresh the renderer's view of both.
+      renderer.rebindParticles(sim.allocation);
+      surfacePipeline.rebindParticles(sim.allocation);
+      syncSurfaceBinding();
+      renderer.setDrawCount(sim.activeCount);
+      // Push the scenario-applied params back to the GUI so the sliders
+      // reflect what's actually running.
+      gui.refresh();
+    },
+    onScenarioStop(): void {
+      scenarioManager.stop(scenarioCtx());
     },
   });
 
@@ -150,10 +212,15 @@ async function run(): Promise<void> {
     if (parityRunning) {
       // Parity harness drives both sims itself; the rAF loop only renders.
     } else if (source === 'gpu') {
+      if (dt > 0) scenarioManager.tick(scenarioCtx(), dt);
       sim.step(encoder, dt, simMarks.gpu);
     } else if (dt > 0) {
       referenceSim.step(dt);
       uploadReferenceParticles();
+    }
+
+    if (source === 'gpu') {
+      surfacePipeline.update(encoder);
     }
 
     const renderMarks = timing.markRender();
@@ -191,6 +258,7 @@ async function run(): Promise<void> {
     gui.dispose();
     stats.dispose();
     renderer.dispose();
+    surfacePipeline.dispose();
     sim.dispose();
     referenceAlloc.gpuBuffer.destroy();
     timing.dispose();

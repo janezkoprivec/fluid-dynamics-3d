@@ -21,6 +21,7 @@ export interface PointSpritesRenderer {
     timestampWrites?: GPURenderPassTimestampWrites,
   ): void;
   rebindParticles(alloc: ParticleAllocation): void;
+  setDrawCount(n: number): void;
   dispose(): void;
 }
 
@@ -92,6 +93,7 @@ export function createPointSpritesRenderer(
   const rparamsHost = new Float32Array(RPARAMS_BUFFER_SIZE / 4);
 
   let alloc = initialAlloc;
+  let drawCount = initialAlloc.count;
   let bindGroup = createBindGroup();
 
   function createBindGroup(): GPUBindGroup {
@@ -160,12 +162,19 @@ export function createPointSpritesRenderer(
 
       pass.setPipeline(pipeline);
       pass.setBindGroup(0, bindGroup);
-      pass.draw(VERTICES_PER_SPRITE, alloc.count, 0, 0);
+      const instances = Math.max(0, Math.min(drawCount, alloc.count));
+      if (instances > 0) {
+        pass.draw(VERTICES_PER_SPRITE, instances, 0, 0);
+      }
       pass.end();
     },
     rebindParticles(next): void {
       alloc = next;
+      drawCount = next.count;
       bindGroup = createBindGroup();
+    },
+    setDrawCount(n): void {
+      drawCount = Math.max(0, Math.floor(n));
     },
     dispose(): void {
       cameraBuffer.destroy();

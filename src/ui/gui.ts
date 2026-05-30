@@ -1,6 +1,8 @@
 import { Pane } from 'tweakpane';
 import type { SimParams } from '../sim';
-import type { RenderParams } from '../render';
+import type { RenderMode, RenderParams } from '../render';
+import type { SurfaceGridResolution, SurfaceParams } from '../surface';
+import type { ScenarioId } from '../scenarios';
 
 export type SimulationSource = 'gpu' | 'reference';
 type SimPresetId =
@@ -25,22 +27,45 @@ const SIM_PRESETS: Record<Exclude<SimPresetId, 'custom'>, SimPreset> = {
   cpu2500: { particleCount: 2500, timestep: 1 / 420, restitution: 0.15 },
 };
 
+type SurfacePresetId = 'custom' | 'g24' | 'g32' | 'g40' | 'g48' | 'g56' | 'g64';
+
+const SURFACE_PRESETS: Record<Exclude<SurfacePresetId, 'custom'>, number> = {
+  g24: 24,
+  g32: 32,
+  g40: 40,
+  g48: 48,
+  g56: 56,
+  g64: 64,
+};
+
+const SIM_BOX_HALF_EXTENT = 0.42;
+// Pad the MC grid outside the sim box. The field-build pass clamps density
+// to zero in this padded region, which lets MC close the iso-surface flush
+// against the glass walls (Müller's wetted-contact convention).
+const SURFACE_PAD_CELLS = 2;
+
 export interface GuiCallbacks {
   onReset: (count: number) => void;
   onSimChange: (params: SimParams) => void;
   onRenderChange: (params: RenderParams) => void;
+  onSurfaceChange: (params: SurfaceParams) => void;
   onSourceChange: (source: SimulationSource) => void;
   onParityRun?: () => void;
+  onScenarioStart: (id: ScenarioId) => void;
+  onScenarioStop: () => void;
 }
 
 export interface Gui {
+  refresh(): void;
   dispose(): void;
 }
 
 export function createGui(
   sim: SimParams,
   render: RenderParams,
+  surface: SurfaceParams,
   source: SimulationSource,
+  scenarios: ReadonlyArray<{ id: ScenarioId; label: string }>,
   cb: GuiCallbacks,
 ): Gui {
   const pane = new Pane({ title: 'fluid-dynamics-3d' });
@@ -91,9 +116,77 @@ export function createGui(
   }
 
   const renderState = {
+    mode: render.mode,
     pointSize: render.pointSize,
     backgroundColor: render.backgroundColor,
+    surfaceBaseColor: render.surfaceBaseColor,
+    surfaceAmbient: render.surfaceAmbient,
+    surfaceShininess: render.surfaceShininess,
+    surfaceSpecular: render.surfaceSpecular,
+    surfaceFresnel: render.surfaceFresnel,
+    surfaceTransmission: render.surfaceTransmission,
+    showBoxEdges: render.showBoxEdges,
+    showBoxFaces: render.showBoxFaces,
+    boxEdgeColor: render.boxEdgeColor,
+    boxFaceColor: render.boxFaceColor,
+    boxEdgeAlpha: render.boxEdgeAlpha,
+    boxFaceAlpha: render.boxFaceAlpha,
   };
+
+  function currentRenderParams(): RenderParams {
+    return {
+      mode: renderState.mode,
+      pointSize: renderState.pointSize,
+      backgroundColor: renderState.backgroundColor,
+      surfaceBaseColor: renderState.surfaceBaseColor,
+      surfaceAmbient: renderState.surfaceAmbient,
+      surfaceShininess: renderState.surfaceShininess,
+      surfaceSpecular: renderState.surfaceSpecular,
+      surfaceFresnel: renderState.surfaceFresnel,
+      surfaceTransmission: renderState.surfaceTransmission,
+      showBoxEdges: renderState.showBoxEdges,
+      showBoxFaces: renderState.showBoxFaces,
+      boxEdgeColor: renderState.boxEdgeColor,
+      boxFaceColor: renderState.boxFaceColor,
+      boxEdgeAlpha: renderState.boxEdgeAlpha,
+      boxFaceAlpha: renderState.boxFaceAlpha,
+    };
+  }
+
+  const surfaceState = {
+    enabled: surface.enabled,
+    preset: presetIdForResolution(surface.gridResolution),
+    gridResolution: surface.gridResolution[0],
+    isoValue: surface.isoValue,
+    maxTriangles: surface.maxTriangles,
+  };
+
+  function gridFromSlider(n: number): SurfaceGridResolution {
+    const v = Math.max(8, Math.min(96, Math.floor(n)));
+    return [v, v, v];
+  }
+  function cellSizeFromResolution(res: SurfaceGridResolution): number {
+    // Reserve PAD cells on each side of the box for the wall-closure region.
+    const span = SIM_BOX_HALF_EXTENT * 2;
+    const usable = Math.max(1, res[0] - 1 - 2 * SURFACE_PAD_CELLS);
+    return span / usable;
+  }
+  function gridMinForResolution(res: SurfaceGridResolution): [number, number, number] {
+    const cell = cellSizeFromResolution(res);
+    const start = -SIM_BOX_HALF_EXTENT - SURFACE_PAD_CELLS * cell;
+    return [start, start, start];
+  }
+  function currentSurfaceParams(): SurfaceParams {
+    const res = gridFromSlider(surfaceState.gridResolution);
+    return {
+      enabled: surfaceState.enabled,
+      gridResolution: res,
+      gridMin: gridMinForResolution(res),
+      cellSize: cellSizeFromResolution(res),
+      isoValue: surfaceState.isoValue,
+      maxTriangles: surfaceState.maxTriangles,
+    };
+  }
 
   const simFolder = pane.addFolder({ title: 'Simulation' });
   simFolder.addBinding(sourceState, 'source', {
@@ -239,6 +332,14 @@ export function createGui(
   });
 
   const renderFolder = pane.addFolder({ title: 'Render' });
+  renderFolder.addBinding(renderState, 'mode', {
+    label: 'Mode',
+    options: {
+      Points: 'points' as RenderMode,
+      Surface: 'surface' as RenderMode,
+      Both: 'both' as RenderMode,
+    },
+  });
   renderFolder.addBinding(renderState, 'pointSize', {
     label: 'Point size',
     min: 1,
@@ -248,16 +349,161 @@ export function createGui(
   renderFolder.addBinding(renderState, 'backgroundColor', {
     label: 'Background',
   });
+  const surfaceShadingFolder = renderFolder.addFolder({
+    title: 'Surface shading',
+    expanded: false,
+  });
+  surfaceShadingFolder.addBinding(renderState, 'surfaceBaseColor', {
+    label: 'Base color',
+  });
+  surfaceShadingFolder.addBinding(renderState, 'surfaceAmbient', {
+    label: 'Ambient',
+    min: 0,
+    max: 1,
+    step: 0.01,
+  });
+  surfaceShadingFolder.addBinding(renderState, 'surfaceShininess', {
+    label: 'Shininess',
+    min: 1,
+    max: 128,
+    step: 1,
+  });
+  surfaceShadingFolder.addBinding(renderState, 'surfaceSpecular', {
+    label: 'Specular',
+    min: 0,
+    max: 1,
+    step: 0.01,
+  });
+  surfaceShadingFolder.addBinding(renderState, 'surfaceFresnel', {
+    label: 'Fresnel',
+    min: 0,
+    max: 2,
+    step: 0.01,
+  });
+  surfaceShadingFolder.addBinding(renderState, 'surfaceTransmission', {
+    label: 'Transmission',
+    min: 0,
+    max: 1,
+    step: 0.01,
+  });
+  const boxFolder = renderFolder.addFolder({
+    title: 'Glass box',
+    expanded: false,
+  });
+  boxFolder.addBinding(renderState, 'showBoxEdges', { label: 'Edges' });
+  boxFolder.addBinding(renderState, 'showBoxFaces', { label: 'Faces' });
+  boxFolder.addBinding(renderState, 'boxEdgeColor', { label: 'Edge color' });
+  boxFolder.addBinding(renderState, 'boxEdgeAlpha', {
+    label: 'Edge alpha',
+    min: 0,
+    max: 1,
+    step: 0.01,
+  });
+  boxFolder.addBinding(renderState, 'boxFaceColor', { label: 'Face color' });
+  boxFolder.addBinding(renderState, 'boxFaceAlpha', {
+    label: 'Face alpha',
+    min: 0,
+    max: 0.5,
+    step: 0.005,
+  });
   renderFolder.on('change', () => {
-    cb.onRenderChange({
-      pointSize: renderState.pointSize,
-      backgroundColor: renderState.backgroundColor,
+    cb.onRenderChange(currentRenderParams());
+  });
+
+  const surfaceFolder = pane.addFolder({ title: 'Surface (MC)' });
+  surfaceFolder.addBinding(surfaceState, 'enabled', { label: 'Enabled' });
+  surfaceFolder.addBinding(surfaceState, 'preset', {
+    label: 'Grid preset',
+    options: {
+      Custom: 'custom' as SurfacePresetId,
+      '24³': 'g24' as SurfacePresetId,
+      '32³': 'g32' as SurfacePresetId,
+      '40³': 'g40' as SurfacePresetId,
+      '48³': 'g48' as SurfacePresetId,
+      '56³': 'g56' as SurfacePresetId,
+      '64³': 'g64' as SurfacePresetId,
+    },
+  }).on('change', (ev) => {
+    const presetId = ev.value as SurfacePresetId;
+    if (presetId === 'custom') return;
+    const res = SURFACE_PRESETS[presetId];
+    if (res === undefined) return;
+    applyingPreset = true;
+    surfaceState.gridResolution = res;
+    pane.refresh();
+    applyingPreset = false;
+    cb.onSurfaceChange(currentSurfaceParams());
+  });
+  surfaceFolder.addBinding(surfaceState, 'gridResolution', {
+    label: 'Grid n³',
+    min: 8,
+    max: 96,
+    step: 1,
+  });
+  surfaceFolder.addBinding(surfaceState, 'isoValue', {
+    label: 'Iso value',
+    min: 0,
+    max: 5000,
+    step: 5,
+  });
+  surfaceFolder.addBinding(surfaceState, 'maxTriangles', {
+    label: 'Max triangles',
+    min: 10_000,
+    max: 5_000_000,
+    step: 10_000,
+  });
+  surfaceFolder.on('change', () => {
+    if (applyingPreset) return;
+    surfaceState.preset = presetIdForN(surfaceState.gridResolution);
+    cb.onSurfaceChange(currentSurfaceParams());
+  });
+
+  const scenarioFolder = pane.addFolder({ title: 'Scenarios', expanded: true });
+  for (const sc of scenarios) {
+    scenarioFolder.addButton({ title: `▶ ${sc.label}` }).on('click', () => {
+      cb.onScenarioStart(sc.id);
     });
+  }
+  scenarioFolder.addButton({ title: '■ Stop scenario' }).on('click', () => {
+    cb.onScenarioStop();
   });
 
   return {
+    refresh(): void {
+      // Re-pull state from the live param objects (they get mutated by
+      // scenarios). Tweakpane reads the source-of-truth, so this just
+      // re-flows the bindings.
+      simState.particleCount = sim.particleCount;
+      simState.timestep = sim.timestep;
+      simState.paused = sim.paused;
+      simState.particleMass = sim.particleMass;
+      simState.smoothingRadius = sim.smoothingRadius;
+      simState.restDensity = sim.restDensity;
+      simState.gasConstant = sim.gasConstant;
+      simState.viscosity = sim.viscosity;
+      simState.gamma = sim.gamma;
+      simState.maxPressure = sim.maxPressure;
+      renderState.mode = render.mode;
+      surfaceState.enabled = surface.enabled;
+      surfaceState.gridResolution = surface.gridResolution[0];
+      surfaceState.isoValue = surface.isoValue;
+      surfaceState.maxTriangles = surface.maxTriangles;
+      surfaceState.preset = presetIdForResolution(surface.gridResolution);
+      pane.refresh();
+    },
     dispose(): void {
       pane.dispose();
     },
   };
+}
+
+function presetIdForResolution(res: SurfaceGridResolution): SurfacePresetId {
+  return presetIdForN(res[0]);
+}
+
+function presetIdForN(n: number): SurfacePresetId {
+  for (const [id, value] of Object.entries(SURFACE_PRESETS)) {
+    if (value === n) return id as SurfacePresetId;
+  }
+  return 'custom';
 }

@@ -29,6 +29,11 @@ export interface IntegratorState {
   wallRepulsion: number;
   wallDamping: number;
   wallRange: number;
+
+  // Number of "live" particles. Slots >= activeCount in the buffer are
+  // ignored by every SPH pass (they early-return via params.particleCount
+  // guards). Pour-style scenarios use this to ramp the population.
+  activeCount: number;
 }
 
 export interface Integrator {
@@ -204,7 +209,7 @@ export function createIntegrator(
     paramsF32[17] = state.boundarySlop;
     paramsF32[18] = state.particleMass;
 
-    paramsU32[19] = alloc.count;
+    paramsU32[19] = Math.max(0, Math.min(state.activeCount, alloc.count)) >>> 0;
     paramsU32[20] = state.gridResolution[0] >>> 0;
     paramsU32[21] = state.gridResolution[1] >>> 0;
     paramsU32[22] = state.gridResolution[2] >>> 0;
