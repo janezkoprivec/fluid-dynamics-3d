@@ -44,6 +44,12 @@ const SIM_BOX_HALF_EXTENT = 0.42;
 // against the glass walls (Müller's wetted-contact convention).
 const SURFACE_PAD_CELLS = 2;
 
+export interface WandUiConfig {
+  radius: number;
+  strength: number;
+  mode: 'push' | 'pull';
+}
+
 export interface GuiCallbacks {
   onReset: (count: number) => void;
   onSimChange: (params: SimParams) => void;
@@ -53,7 +59,14 @@ export interface GuiCallbacks {
   onParityRun?: () => void;
   onScenarioStart: (id: ScenarioId) => void;
   onScenarioStop: () => void;
+  onWandChange: (config: WandUiConfig) => void;
 }
+
+export const DEFAULT_WAND_UI: WandUiConfig = {
+  radius: 0.12,
+  strength: 15,
+  mode: 'push',
+};
 
 export interface Gui {
   refresh(): void;
@@ -466,6 +479,29 @@ export function createGui(
   }
   scenarioFolder.addButton({ title: '■ Stop scenario' }).on('click', () => {
     cb.onScenarioStop();
+  });
+
+  // Wand (shift + left-drag pushes water around the picked anchor).
+  const wandState = { ...DEFAULT_WAND_UI };
+  const wandFolder = pane.addFolder({ title: 'Wand (shift+drag)', expanded: true });
+  wandFolder.addBinding(wandState, 'mode', {
+    label: 'Mode',
+    options: { Push: 'push', Pull: 'pull' },
+  });
+  wandFolder.addBinding(wandState, 'radius', {
+    label: 'Radius',
+    min: 0.03,
+    max: 0.4,
+    step: 0.005,
+  });
+  wandFolder.addBinding(wandState, 'strength', {
+    label: 'Strength',
+    min: 0,
+    max: 80,
+    step: 0.5,
+  });
+  wandFolder.on('change', () => {
+    cb.onWandChange({ ...wandState });
   });
 
   return {

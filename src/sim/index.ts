@@ -8,6 +8,12 @@ import {
   type Integrator,
   type IntegratorState,
 } from './integrator';
+import {
+  createInteraction,
+  ZERO_INTERACTION,
+  type Interaction,
+  type InteractionState,
+} from './interaction';
 
 export interface SimParams {
   particleCount: number;
@@ -100,6 +106,7 @@ export interface Sim {
   reset(newCount?: number): void;
   setParams(patch: Partial<SimParams>): void;
   setActiveCount(n: number): void;
+  setInteraction(state: InteractionState): void;
   dispose(): void;
 }
 
@@ -114,7 +121,9 @@ export function createSim(
     originMin: SEED_ORIGIN_MIN,
   });
 
-  const integrator: Integrator = createIntegrator(device, alloc);
+  const interaction: Interaction = createInteraction(device);
+  interaction.write(ZERO_INTERACTION);
+  const integrator: Integrator = createIntegrator(device, alloc, interaction);
   let activeCount = params.particleCount;
 
   function currentIntegratorState(dt: number): IntegratorState {
@@ -185,11 +194,17 @@ export function createSim(
     setActiveCount(n): void {
       activeCount = Math.max(0, Math.min(Math.floor(n), alloc.count));
     },
+    setInteraction(state): void {
+      interaction.write(state);
+    },
     dispose(): void {
       integrator.dispose();
+      interaction.dispose();
       alloc.gpuBuffer.destroy();
     },
   };
 }
 
 export type { ParticleAllocation } from './particles';
+export type { InteractionState, WandMode } from './interaction';
+export { ZERO_INTERACTION } from './interaction';

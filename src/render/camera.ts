@@ -68,6 +68,10 @@ export function createOrbitCamera(
     let lastY = 0;
 
     const onPointerDown = (e: PointerEvent): void => {
+      // Shift + left-click is reserved for the interaction "wand" handler
+      // (see ui/interaction.ts). Bail without claiming the pointer so that
+      // handler can take over.
+      if (e.button === 0 && e.shiftKey) return;
       if (e.button === 0) dragMode = 'orbit';
       else if (e.button === 2) dragMode = 'pan';
       else return;
@@ -83,8 +87,10 @@ export function createOrbitCamera(
       lastX = e.clientX;
       lastY = e.clientY;
       if (dragMode === 'orbit') {
-        theta -= dx * 0.005;
-        phi = clamp(phi - dy * 0.005, 0.05, Math.PI - 0.05);
+        // Sign convention: dragging in a direction should make the scene
+        // appear to move that way (direct-manipulation feel).
+        theta += dx * 0.005;
+        phi = clamp(phi + dy * 0.005, 0.05, Math.PI - 0.05);
       } else {
         const panScale = radius * 0.0015;
         const right = vec3.create(

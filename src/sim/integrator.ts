@@ -3,6 +3,7 @@ import densityWgsl from './shaders/density.wgsl?raw';
 import forcesWgsl from './shaders/forces.wgsl?raw';
 import type { ParticleAllocation } from './particles';
 import { createSpatialHash, type SpatialHash } from './spatialHash';
+import type { Interaction } from './interaction';
 
 const PARAMS_BYTE_SIZE = 112;
 const WORKGROUP_SIZE = 64;
@@ -49,6 +50,7 @@ export interface Integrator {
 export function createIntegrator(
   device: GPUDevice,
   initialAlloc: ParticleAllocation,
+  interaction: Interaction,
 ): Integrator {
   const module = device.createShaderModule({
     label: 'integrate.wgsl',
@@ -112,7 +114,11 @@ export function createIntegrator(
     label: 'forces/pipeline',
     layout: device.createPipelineLayout({
       label: 'forces/layout',
-      bindGroupLayouts: [bindGroupLayout, neighborBindGroupLayout],
+      bindGroupLayouts: [
+        bindGroupLayout,
+        neighborBindGroupLayout,
+        interaction.bindGroupLayout,
+      ],
     }),
     compute: { module: forcesModule, entryPoint: 'cs_main' },
   });
@@ -246,6 +252,7 @@ export function createIntegrator(
         forcesPass.setPipeline(forcesPipeline);
         forcesPass.setBindGroup(0, bindGroup);
         forcesPass.setBindGroup(1, neighborBindGroup);
+        forcesPass.setBindGroup(2, interaction.bindGroup);
         forcesPass.dispatchWorkgroups(groups);
         forcesPass.end();
       }

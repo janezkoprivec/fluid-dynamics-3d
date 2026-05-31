@@ -5,6 +5,8 @@ import {
   DEFAULT_SIM_PARAMS,
   SIM_BOX_MAX,
   SIM_BOX_MIN,
+  ZERO_INTERACTION,
+  type InteractionState,
   type SimParams,
 } from './sim';
 import {
@@ -18,8 +20,14 @@ import {
 } from './render';
 import {
   createGui,
+  DEFAULT_WAND_UI,
   type SimulationSource,
+  type WandUiConfig,
 } from './ui/gui';
+import {
+  attachWand,
+  type WandHandle,
+} from './ui/interaction';
 import type { SurfaceParams } from './surface';
 import { createStats } from './ui/stats';
 import {
@@ -87,7 +95,11 @@ async function run(): Promise<void> {
   let source: SimulationSource = 'gpu';
 
   const scenarioManager = createScenarioManager();
-  function scenarioCtx(): { sim: typeof sim; surface: typeof surfacePipeline; renderer: typeof renderer } {
+  function scenarioCtx(): {
+    sim: typeof sim;
+    surface: typeof surfacePipeline;
+    renderer: typeof renderer;
+  } {
     return { sim, surface: surfacePipeline, renderer };
   }
 
@@ -102,6 +114,22 @@ async function run(): Promise<void> {
   let referenceAlloc = allocateParticles(device, sim.params.particleCount);
   let referenceSim = new CpuReferenceSim(toReferenceParams(sim.params));
   uploadReferenceParticles();
+
+  // Interaction state — the wand sampler writes into a long-lived
+  // InteractionState we ship to the sim each frame via setInteraction.
+  const interactionState: InteractionState = {
+    ...ZERO_INTERACTION,
+    mousePos: [...ZERO_INTERACTION.mousePos] as [number, number, number],
+    mouseDir: [...ZERO_INTERACTION.mouseDir] as [number, number, number],
+  };
+  let wandConfig: WandUiConfig = { ...DEFAULT_WAND_UI };
+  const wand: WandHandle = attachWand({
+    canvas,
+    camera: renderer.camera,
+    boxMin: SIM_BOX_MIN,
+    boxMax: SIM_BOX_MAX,
+    initial: wandConfig,
+  });
 
   const detachCamera = renderer.camera.attach(canvas);
   applyAspect();
@@ -181,6 +209,10 @@ async function run(): Promise<void> {
     onScenarioStop(): void {
       scenarioManager.stop(scenarioCtx());
     },
+    onWandChange(next: WandUiConfig): void {
+      wandConfig = { ...next };
+      wand.setConfig(wandConfig);
+    },
   });
 
   const timing = createTimingPool(device, hasTimestampQuery);
@@ -213,6 +245,8 @@ async function run(): Promise<void> {
       // Parity harness drives both sims itself; the rAF loop only renders.
     } else if (source === 'gpu') {
       if (dt > 0) scenarioManager.tick(scenarioCtx(), dt);
+      syncInteractionState();
+      sim.setInteraction(interactionState);
       sim.step(encoder, dt, simMarks.gpu);
     } else if (dt > 0) {
       referenceSim.step(dt);
@@ -254,6 +288,7 @@ async function run(): Promise<void> {
     if (disposed) return;
     disposed = true;
     running = false;
+    wand.dispose();
     detachCamera();
     gui.dispose();
     stats.dispose();
@@ -265,6 +300,16 @@ async function run(): Promise<void> {
     surface.dispose();
     try { context!.unconfigure(); } catch { /* may already be torn down */ }
     try { device.destroy(); } catch { /* already lost */ }
+  }
+
+  // Pull the latest wand sample into the InteractionState the sim consumes.
+  function syncInteractionState(): void {
+    const sample = wand.sample();
+    interactionState.mouseActive = sample.active;
+    interactionState.mousePos = sample.pos;
+    interactionState.mouseDir = sample.dir;
+    interactionState.mouseRadius = sample.radius;
+    interactionState.mouseStrength = sample.strength;
   }
   // pagehide is far more reliable than beforeunload in modern browsers,
   // and fires for both navigation away and full reloads.

@@ -39,11 +39,23 @@ struct SimParams {
   _pad1: f32,
 };
 
+struct InteractionParams {
+  mousePos: vec3<f32>,
+  mouseRadius: f32,
+  mouseDir: vec3<f32>,
+  mouseStrength: f32,
+  mouseActive: u32,
+  _pad0: u32,
+  _pad1: u32,
+  _pad2: u32,
+};
+
 @group(0) @binding(0) var<storage, read_write> particles: array<Particle>;
 @group(0) @binding(1) var<uniform> params: SimParams;
 @group(1) @binding(2) var<storage, read> sortedEntries: array<vec2<u32>>;
 @group(1) @binding(3) var<storage, read> cellStart: array<u32>;
 @group(1) @binding(4) var<storage, read> cellEnd: array<u32>;
+@group(2) @binding(0) var<uniform> interaction: InteractionParams;
 
 const PI: f32 = 3.141592653589793;
 const EPS: f32 = 1e-6;
@@ -159,6 +171,24 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   // External force scaled by density (Muller-style)
   force = force + params.gravity * rhoI;
+
+  // Mouse wand: radial impulse around the picked anchor. Push mode shoves
+  // particles along the drag direction; pull mode sucks them toward the
+  // anchor. Smooth quadratic falloff so the edge of the wand isn't a hard
+  // step (which would broadcast a stiff impulse into the pressure solver).
+  if (interaction.mouseActive != 0u) {
+    let d = pi.position - interaction.mousePos;
+    let dist = length(d);
+    if (dist < interaction.mouseRadius && interaction.mouseRadius > EPS) {
+      let t = 1.0 - dist / interaction.mouseRadius;
+      let w = t * t;
+      var dirVec = interaction.mouseDir;
+      if (interaction.mouseActive == 2u) {
+        dirVec = -safeNormalize(d);
+      }
+      force = force + dirVec * (interaction.mouseStrength * w * rhoI);
+    }
+  }
 
   var outP = pi;
   outP.acceleration = force / rhoI;

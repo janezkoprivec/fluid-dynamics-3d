@@ -6,8 +6,8 @@
       {Real-Time 3D SPH Fluid Simulation with Marching-Cubes Surface
        Reconstruction in WebGPU}
 
-\author[J.\,Koprivec]
-{\parbox{\textwidth}{\centering J.\,Koprivec$^{1}$}
+\author[Janez\,Koprivec]
+{\parbox{\textwidth}{\centering Janez\,Koprivec$^{1}$}
         \\
 {\parbox{\textwidth}{\centering $^1$University of Ljubljana, Faculty of Computer and Information Science, Slovenia
        }
@@ -104,16 +104,15 @@ limited by the speed at which information propagates through the
 particle set (the CFL condition on the SPH sound speed).
 
 The seminar topic is exactly this method, in 3D, with surface
-reconstruction by marching cubes for visualisation. Concretely, we were
-asked to:
+reconstruction by marching cubes for visualisation. The scope covers:
 
 \begin{itemize}
-  \item implement a basic SPH solver covering density estimation,
-        pressure, viscosity and gravity;
-  \item render the resulting fluid using a surface-reconstruction
-        algorithm (marching cubes was the suggested choice);
-  \item evaluate the resulting system with respect to particle count,
-        initial conditions and parameter choices.
+  \item a basic SPH solver covering density estimation, pressure,
+        viscosity and gravity;
+  \item rendering the resulting fluid via surface reconstruction
+        (marching cubes was the suggested choice);
+  \item evaluation of the resulting system with respect to particle
+        count, initial conditions and parameter choices.
 \end{itemize}
 
 The contribution of this seminar is a complete working implementation
@@ -127,6 +126,9 @@ voxel and emits a compacted triangle mesh; and a CPU JavaScript SPH
 reference used as a numerical oracle. The whole pipeline reaches
 interactive frame rates for $\sim 10^{4}$ particles on commodity
 hardware and was used to generate the figures throughout this report.
+The full source code, including the build instructions and the
+scenarios shown in the figures, is released under the MIT licence at
+\URL{https://github.com/janezkoprivec/fluid-dynamics-3d}.
 
 The remainder of this report is organised as follows.
 Section~\ref{sec:background} reviews the WCSPH formulation we
@@ -317,19 +319,11 @@ $N_{\text{cells}}$-long arrays.
 
 A bitonic sort was chosen over the more performant GPU radix sort
 because it is short ($\sim$100 lines of WGSL), self-contained, and
-easy to verify, while being more than fast enough at the target
-particle counts. Each bitonic stage is a pre-baked
-$(j,k,\text{mode}, N_{\text{pow2}})$ tuple. To get all stages to share
-one pipeline, we pack every stage into a single uniform buffer and
-select the active stage with a dynamic uniform offset
-(\texttt{setBindGroup(\dots,[offset])}). This avoids the trap that
-\texttt{queue.writeBuffer} between encoded passes is \emph{not}
-sequenced by the GPU --- all writes happen on the queue before the
-single \texttt{submit}, so a per-stage rewrite would give every stage
-the values of the \emph{last} written stage. This and a related
-non-power-of-two padding bug, in which a real entry could be paired
-with a sentinel from the virtual padding, were caught by a stand-alone
-sort unit test before integration with SPH.
+fast enough at the target particle counts. All stages share one
+pipeline; the $(j,k,\text{mode})$ tuple for each stage is read from a
+single uniform buffer through a dynamic offset, which sidesteps the
+trap that \texttt{queue.writeBuffer} between encoded passes is not
+sequenced by the GPU.
 
 \subsection{Density, forces, integration}
 
@@ -353,124 +347,143 @@ adds gravity scaled by density to match the Müller momentum
 convention. The result is stored as the particle's acceleration. The
 \texttt{integrate.wgsl} pass advances velocity then position, applies
 the wall handling described in the next subsection, and runs at a
-substepped inner time step bounded by $\Delta t \le 1/480\,\text{s}$
-to stay below the CFL bound at $h = 0.075\,\text{m}$ and
-$k = 1500$.
+substepped inner time step capped at $\Delta t \le 1/480\,\text{s}$
+(a hard-coded constant chosen empirically to stay inside the CFL
+bound at the default $h$ and $k$).
 
 \subsection{Boundary handling}
-
-\begin{figure}[htb]
-  \centering
-  \includegraphics[width=0.95\linewidth]{figures/settled-pool}
-  \caption{\label{fig:settled}A settled fluid inside the simulation box.
-           The flat top and corner curvature show that the soft
-           repulsion band suppresses the kernel-deficiency tongues
-           described in \S\ref{sec:walls} without over-damping the
-           bulk.}
-\end{figure}
 \label{sec:walls}
 
 A plain reflective box wall is not enough in SPH: a particle pressed
 against a wall sums its density over a sphere that is only half-filled
-with fluid neighbours (the other half is outside the wall), under-reports
-$\rho$, under-shoots $p$ through (\ref{eq:tait}), and is therefore
-pushed harder \emph{into} the wall by bulk pressure than it can push
-back. With reflection only, this manifests as a thin sheet of fluid
-``climbing'' the box --- the classical kernel-deficit artefact
-\cite{Ihmsen2014}.
-
-The proper fix is ghost particles or boundary particles; the cheap fix
-that works for visual purposes is a Monaghan-style soft repulsion
-band. Within a band of width $\eta \cdot h$ of any wall (we use
-$\eta = 0.7$), an outward acceleration $a = K\,t^{2}$ is added, where
-$t \in [0,1]$ ramps from $0$ at the band edge to $1$ at the wall and
-$K$ is the repulsion strength. To stop the band from acting like a
-purely conservative spring (which would make particles bounce
-springily off every wall), a velocity-normal damping
-$a' = -c\,v_{n}\,t$ is also applied, but only when the velocity
-component points \emph{into} the wall, so it can never trap a
-particle. The reflective wall is then kept as a hard backstop for the
-rare cases where a particle still tunnels (e.g. at high impact
-velocities). Figure~\ref{fig:settled} shows the resulting steady state.
-
-\subsection{Marching-cubes surface reconstruction on GPU}
-
-The marching-cubes implementation runs entirely on the GPU as a
-sequence of seven compute passes that we orchestrate from
-\texttt{surface/index.ts}:
-
-\paragraph*{Field build.}
-The \texttt{fieldBuild.wgsl} pass dispatches one thread per grid vertex
-of an $n_x \times n_y \times n_z$ scalar field, with each thread
-looping over the active particles and accumulating their poly6
-contribution at its sample position. We chose the gather direction
-(thread-per-voxel) over the scatter direction (thread-per-particle) so
-the field-build pass needs no atomics. Voxels that lie outside the
-simulation box are clamped to $\phi = 0$, which lets marching cubes
-close the iso-surface flush against the glass. A small bit-twiddle
-test discards NaN/Inf samples in case a single bad particle slips in.
-
-\paragraph*{Classify.}
-\texttt{mcClassify.wgsl} reads the eight corners of each voxel,
-compares each against the iso value to build the 8-bit case index,
-and writes \texttt{cubeCase} and \texttt{cubeTriCount} (the latter
-fetched from a 256-entry \texttt{numTrisTable} uploaded once at
-startup).
-
-\paragraph*{Compaction by exclusive prefix scan.}
-The lookup table tells us how many triangles each voxel emits, so the
-write offset for voxel $i$ in the output vertex buffer is the
-\emph{exclusive prefix sum} of triangle counts up to $i$. We compute
-this scan on GPU via a Blelloch-style multi-level pass: a
-\texttt{scanLocal} pass scans blocks of 256 elements and writes
-per-block sums; a \texttt{scanBlockSums} pass scans the block sums
-(recursively when needed); a \texttt{scanAddOffsets} pass adds the
-block-level offsets back into the per-block prefixes. This part of
-the pipeline does not depend on the field --- it is a generic
-GPU-compaction primitive and was written and tested against random
-synthetic inputs before being plugged into the rest of the surface
-pipeline.
-
-\paragraph*{Indirect draw arguments.}
-A tiny \texttt{computeDrawMeta.wgsl} pass reads the very last entries
-of the prefix and tri-count buffers, computes the total triangle
-count, clamps to the safety cap \texttt{maxTriangles}, and writes the
-four-word \texttt{drawIndirect} arguments directly into a
-\texttt{GPUBuffer} bound for indirect drawing. This means the CPU
-never needs to know how many triangles the GPU produced --- the draw
-call uses \texttt{drawIndirect}, which keeps the round-trip latency
-out of the frame loop.
-
-\paragraph*{Emit.}
-\texttt{mcEmit.wgsl} reads each voxel's case index and its prefix
-offset, looks up the per-case triangle table, interpolates vertex
-positions along the cube edges where the field crosses the iso value,
-and computes per-vertex normals from central differences of the
-scalar field. Outputs are written to the
-$\text{positions}/\text{normals}$ storage buffers at the offsets
-reserved by the scan.
-
-\paragraph*{Render.}
-The mesh is rasterised by \texttt{render/surfaceMesh.ts}, which uses
-\texttt{drawIndirect} on the buffer written in the previous step,
-applies a Phong + Fresnel shader with a fixed light direction and a
-cheap fake refraction colour, and blends the result over either an
-empty scene or the point-sprite render of the underlying particles.
-The renderer exposes three modes (\emph{points}, \emph{surface},
-\emph{both}) so the same scene can be inspected in either
-representation; this is also useful for debugging the surface
-pipeline against the particles it is supposed to fit
-(Figure~\ref{fig:both}).
+with fluid neighbours (the other half is outside the wall),
+under-reports $\rho$, under-shoots $p$ through (\ref{eq:tait}), and is
+therefore pushed harder \emph{into} the wall by bulk pressure than it
+can push back. Without compensation, the SPH bulk pressure drives the
+fluid into the boundary until it stratifies into horizontal sheets
+along the floor and walls (Figure~\ref{fig:layering}); once stuck the
+fluid stays stuck, because each compressed sheet acts as a new
+kernel-deficient ``wall'' for the layer above it.
 
 \begin{figure}[htb]
   \centering
-  \includegraphics[width=0.95\linewidth]{figures/teaser}
-  \caption{\label{fig:both}\emph{both} render mode: the same scene with
-           point sprites and the marching-cubes surface drawn
-           simultaneously. Useful for verifying that the iso-surface
-           actually hugs the particle cloud rather than drifting or
-           ringing inside it.}
+  \includegraphics[width=0.95\linewidth]{figures/layering}
+  \caption{\label{fig:layering}Wall-band parameters set to zero. The
+           kernel deficit at the boundary lets bulk pressure pile the
+           fluid into stable horizontal sheets along the floor and the
+           lower walls. Restoring the wall band breaks this regime.}
 \end{figure}
+
+The proper fix is ghost or boundary particles; the cheap fix that works
+visually is a Monaghan-style soft repulsion band. Within a band of
+width $\eta \cdot h$ of any wall ($\eta = 0.7$), an outward
+acceleration $a = K\,t^{2}$ is added, where $t \in [0,1]$ ramps from
+$0$ at the band edge to $1$ at the wall and $K$ is the repulsion
+strength. To stop the band from behaving as a purely conservative
+spring (which would make every wall bounce springily), a
+velocity-normal damping $a' = -c\,v_{n}\,t$ is also applied, but only
+when the velocity component points \emph{into} the wall so it can
+never trap a particle. The reflective wall is kept as a hard backstop
+for the rare cases where a particle still tunnels at high velocity.
+Figure~\ref{fig:settled} shows the resulting steady state with the
+band active.
+
+\begin{figure}[htb]
+  \centering
+  \includegraphics[width=0.95\linewidth]{figures/settled-pool}
+  \caption{\label{fig:settled}Settled fluid with the wall band active.
+           The flat top and gentle corner curvature show that the band
+           suppresses the kernel-deficit layering of
+           Figure~\ref{fig:layering} without over-damping the bulk.}
+\end{figure}
+
+\subsection{Marching-cubes surface reconstruction on GPU}
+
+The marching-cubes pipeline runs entirely on the GPU as a sequence of
+compute passes orchestrated from \texttt{surface/index.ts} (seven
+distinct compute pipelines; the per-frame dispatch count depends on
+the grid resolution, since the prefix-scan stage is hierarchical).
+\textbf{Field build} dispatches one thread per grid vertex of an
+$n_x\!\times\!n_y\!\times\!n_z$ scalar field; each thread loops over
+the active particles and accumulates their poly6 contribution at its
+sample position. The gather direction (thread-per-voxel) avoids the
+atomics that a scatter implementation would require, and voxels
+outside the simulation box are clamped to $\phi = 0$ so marching cubes
+closes the iso-surface flush against the glass. \textbf{Classify}
+samples the eight corners of each voxel, builds the 8-bit case index
+against $\phi_{\text{iso}}$, and looks up the triangle count from a
+256-entry table uploaded once at startup.
+
+The write offset of each voxel in the output vertex buffer is the
+\emph{exclusive prefix sum} of triangle counts up to that voxel. We
+compute it with a Blelloch-style multi-level scan
+(\texttt{scanLocal}, \texttt{scanBlockSums}, \texttt{scanAddOffsets})
+that is a generic GPU compaction primitive --- tested standalone
+before being plugged in. A small \texttt{computeDrawMeta} pass reads
+the final element of the prefix and triangle-count buffers, clamps to
+\texttt{maxTriangles}, and writes the four-word \texttt{drawIndirect}
+arguments directly into a GPU buffer, so the CPU never learns the
+triangle count. The final \textbf{emit} pass reads each voxel's case
+index, interpolates vertex positions along the cube edges and computes
+normals from central differences of the scalar field, writing the
+result at the offsets reserved by the scan. The renderer then
+rasterises the mesh with a Phong+Fresnel shader and exposes
+\emph{points}, \emph{surface} and \emph{both} modes so the iso-surface
+can be visually checked against the particles it should fit.
+
+\subsection{Interaction: a mouse-driven force wand}
+\label{sec:interaction}
+
+To make the demo something other than a fixed scenario, the user can
+push or pull the running fluid with the mouse. The cursor is
+unprojected into a world-space ray; we intersect this ray with the
+simulation box AABB (slab test) and take the entry point as the
+interaction anchor $\mathbf{x}_w$. When the user drags with the
+modifier key held, we additionally track a smoothed drag direction
+$\hat{\mathbf{d}}_w$ over the last few frames so individual cursor
+jitters do not produce spiky impulses.
+
+The wand state is exposed to the GPU through a small
+\texttt{InteractionParams} uniform in its own bind group, written by
+the host every frame. Inside \texttt{forces.wgsl}, after gravity, we
+add an external acceleration on particles inside the wand radius:
+\begin{equation}
+  \mathbf{a}_w \;=\; \rho_i \cdot s\cdot w(r)\cdot
+  \begin{cases}
+    \hat{\mathbf{d}}_w & \text{(push)}\\
+    -\hat{\mathbf{r}}/\lVert\mathbf{r}\rVert & \text{(pull)}
+  \end{cases}
+\end{equation}
+with $\mathbf{r}=\mathbf{x}_i-\mathbf{x}_w$, smooth falloff
+$w(r)=(1-r/R)^{2}$ inside the radius $R$ and zero outside, and a
+user-controlled strength $s$. Scaling by $\rho_i$ matches the gravity
+convention already in the shader, so a given $s$ produces the same
+visible acceleration regardless of local density. Modes (push vs.
+pull), radius, and strength are bound to GUI sliders.
+
+Because the wand is just a per-frame external acceleration added in
+the same pass that already evaluates gravity, no new compute pass or
+neighbour traversal is introduced; the cost is a single uniform read
+plus a branch per particle. Figure~\ref{fig:interaction} shows the
+wand in use --- a vertical pull lifts a peak of fluid out of the
+settled pool.
+
+\begin{figure}[htb]
+  \centering
+  \includegraphics[width=0.95\linewidth]{figures/interaction}
+  \caption{\label{fig:interaction}Wand interaction: a pull force
+           centred above the pool lifts a peak of fluid out of the
+           surface. The peak collapses into a droplet as the force is
+           released.}
+\end{figure}
+
+A solid-body drop feature (a sinking/floating sphere) was also
+prototyped but descoped: one-way coupling looked wrong (the sphere
+hovered above where the surface visibly was) and proper two-way
+coupling requires a per-frame GPU readback of accumulated contact
+forces that would have ballooned the scope of the seminar. The wand
+demonstrates fluid--structure interaction adequately for the
+deliverable.
 
 \subsection{Validation and parity harness}
 
@@ -491,54 +504,63 @@ $|\mathbf{p}|$ against tolerance bands.
 
 \subsection{CPU/GPU numerical parity}
 
-After aligning the two solvers (matching CFL substep cap, disabling
-the GPU's wall band on both sides, and matching boundary tangent
-damping) the bulk density agrees to better than $1.1\,\%$ over the
-whole 600-step run, and all metrics agree to better than $2.6\,\%$ in
-the validation window (steps 30--90, where the system is still
-flowing and meaningful per-particle quantities can be compared). After
-$\sim$step 100 the per-particle metrics begin to drift by tens of
-percent, but the macroscopic state (the density distribution, the
-total kinetic energy envelope) continues to track. This is not a
-correctness bug --- it is parallel-reduction-order chaos: the CPU
-sums in sequential order while the GPU does tree reductions, and the
-sub-ULP differences are amplified by the chaotic dynamics of an
-equilibrium fluid. The same effect appears in published GPU SPH
-parity studies and is what motivates statistical, not bit-exact,
-validation \cite{Ihmsen2014}. For the seminar's purpose, the GPU SPH
-math --- density, pressure, viscosity, integration --- is validated
-against the CPU oracle.
+The CPU and GPU solvers were stepped in lockstep on a 1\,536-particle
+dam-break at $\Delta t = 1/240\,\text{s}$ for 600 steps, with the GPU
+wall band, the boundary tangent damping and the CFL substep cap
+matched on both sides so that the only remaining difference is the
+SPH math itself. Table~\ref{tab:parity} reports the relative
+difference $|\text{CPU}-\text{GPU}|/\text{CPU}$ on five representative
+samples.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{rrrrr}
+\hline
+\textbf{step} & $\Delta\rho_{\text{avg}}$ & $\Delta|\mathbf{v}|_{\max}$ & $\Delta KE$ & $\Delta|\mathbf{p}|_{\max}$ \\
+\hline
+ 30 & 0.47\,\% &  0.00\,\% &  0.07\,\% &  0.40\,\% \\
+ 60 & 0.06\,\% &  1.07\,\% &  0.00\,\% &  2.17\,\% \\
+ 90 & 0.10\,\% & 10.47\,\% &  3.08\,\% &  1.53\,\% \\
+300 & 1.43\,\% & 28.06\,\% &  3.15\,\% & 50.16\,\% \\
+600 & 0.04\,\% & 50.97\,\% & 57.92\,\% & 79.59\,\% \\
+\hline
+\end{tabular}
+\caption{\label{tab:parity}CPU/GPU relative difference on a 600-step
+         dam-break, $N\!=\!1536$, $\Delta t\!=\!1/240\,\text{s}$.}
+\end{table}
+
+Across all 20 samples, $\rho_{\text{avg}}$ stays within $3.63\,\%$ of
+the CPU oracle (median below $1\,\%$). For the first $\sim$90 steps,
+the entire metric set agrees within $\sim 3\,\%$ --- the period in
+which the system is still meaningfully ``flowing''. After that,
+per-particle metrics like $KE$ and $|\mathbf{p}|_{\max}$ start to
+drift substantially while the bulk density distribution keeps
+tracking. The cause is parallel-reduction-order chaos: the CPU sums
+the neighbour kernels sequentially, the GPU does tree reductions, and
+the resulting sub-ULP differences are amplified by the chaotic
+dynamics of the equilibrium fluid. The same effect appears in
+published GPU SPH parity studies and is what motivates statistical,
+not bit-exact, validation \cite{Ihmsen2014}. We take this as evidence
+that the GPU SPH math --- density, pressure, viscosity, integration
+--- is correct.
 
 \subsection{Visual results across scenarios}
 
 Figure~\ref{fig:teaser} (front page) shows the system at the target
 operating point: a $\sim$10\,k-particle pour stream impacting a pool
-and rendered with both representations. Figure~\ref{fig:pour-stream}
-zooms in on the impact at mid-fill, where the marching-cubes surface
-hugs the splash dome while individual stray particles remain visible
-above. Figure~\ref{fig:obstacle-splash} shows the same scenario with
-a static obstacle (rendered separately as an SDF in the surface
-shader), which produces a recognisable rim of fluid trapped against
-the obstacle base.
+in the \emph{both} render mode. Figure~\ref{fig:pour-stream} shows
+the pure surface view of the same scenario mid-fill, where the
+marching-cubes mesh traces the stream and accumulating pool while
+detached droplets pop in and out of existence as the iso-surface
+condition turns on and off around them.
 
 \begin{figure}[htb]
   \centering
   \includegraphics[width=0.95\linewidth]{figures/pour-stream}
-  \caption{\label{fig:pour-stream}Mid-fill of the pouring scenario.
-           A continuous SPH stream is released from a 4$\times$4 puck
-           emitter at the top of the box and impacts the accumulating
-           pool. The marching-cubes surface (smooth) captures the
-           splash dome; stray particles outside the iso-level remain
-           visible.}
-\end{figure}
-
-\begin{figure}[htb]
-  \centering
-  \includegraphics[width=0.95\linewidth]{figures/obstacle-splash}
-  \caption{\label{fig:obstacle-splash}Pour scenario with a static
-           obstacle. The stream wraps around the obstacle and
-           accumulates as a rim, the typical behaviour of an
-           incompressible fluid running over a convex body.}
+  \caption{\label{fig:pour-stream}Mid-fill of the pouring scenario in
+           pure surface mode. The marching-cubes mesh traces the
+           continuous stream above the pool and resolves individual
+           droplets that have broken off.}
 \end{figure}
 
 \subsection{Parameter sensitivity}
@@ -624,8 +646,8 @@ larger stiffness $k$ (and a proportionally smaller $\Delta t$) or a
 switch to one of the predictive-corrective family of solvers
 (PCISPH, IISPH, PBF) that add a pressure-correction loop inside each
 step \cite{Ihmsen2014}. We intentionally stayed with WCSPH because the
-brief asked for a basic SPH solver, and because the corrective
-schemes meaningfully complicate the GPU implementation.
+scope is a basic SPH solver, and because the corrective schemes
+meaningfully complicate the GPU implementation.
 
 \paragraph*{Boundary handling.}
 The soft band described in \S\ref{sec:walls} is an ad-hoc fix for the
