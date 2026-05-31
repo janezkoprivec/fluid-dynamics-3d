@@ -3,5 +3,5 @@ services:
     build: .
     image: fluid-dynamics-3d:latest
     restart: unless-stopped
-    ports:
-      - "8080:80"
+    expose:
+      - "80"
