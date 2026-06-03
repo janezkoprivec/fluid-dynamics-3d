@@ -1,5 +1,7 @@
 # fluid-dynamics-3d
 
+**Deploy available at:** [`sph.svarog.top`](https://sph.svarog.top)
+
 Phase 0 skeleton for a 3D SPH fluid simulation that will later render via
 marching cubes. This phase contains no SPH code; it exists to validate the
 Vite + TypeScript + TypeGPU + WebGPU toolchain end-to-end and to lock in the
